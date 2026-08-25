@@ -34,6 +34,12 @@ interface SlideData {
   landmarkType?: string;
 }
 
+// ─── Model Config ───
+// Groq has deprecated llama-3.3-70b-versatile.
+// Recommended production replacement:  openai/gpt-oss-120b
+// Preview multimodal alternative:      qwen/qwen3.6-27b
+const GROQ_MODEL_ID = 'openai/gpt-oss-120b';
+
 export default function ConversationalWayfindingUI() {
   const [hasMounted, setHasMounted] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -128,7 +134,7 @@ RULES:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: GROQ_MODEL_ID,
           messages: [
             { role: 'system', content: 'You rewrite building navigation directions for maximum clarity. Output only the rewritten text, nothing else.' },
             { role: 'user', content: prompt }
@@ -237,11 +243,15 @@ RESPOND ONLY IN THIS JSON FORMAT:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: GROQ_MODEL_ID,
           messages,
           temperature: 0.7,
           max_tokens: 512,
-          response_format: { type: 'json_object' }
+          response_format: { type: 'json_object' },
+          // GPT OSS 120B is a reasoning model; hide reasoning tokens so they
+          // don't leak into the JSON output. Remove this if you switch to a
+          // non-reasoning model (e.g. qwen/qwen3.6-27b with reasoning_effort: 'none').
+          reasoning_format: 'hidden'
         })
       });
 
