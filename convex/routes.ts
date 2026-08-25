@@ -12,6 +12,10 @@ export const getBuildingContext = query({
     const floors = await ctx.db.query("floors").collect();
     const nodes = await ctx.db.query("nodes").collect();
     const qrCodes = await ctx.db.query("qrCodes").collect();
+    const assistantConfig = await ctx.db
+      .query("assistantConfig")
+      .withIndex("by_key", (q) => q.eq("key", "default"))
+      .first();
 
     const buildQrContent = (entityType: "node" | "destination", entityId: string, label: string) =>
       `https://navi-mauve-mu.vercel.app/continue?entityType=${entityType}&entityId=${encodeURIComponent(entityId)}&label=${encodeURIComponent(label)}`;
@@ -40,6 +44,7 @@ export const getBuildingContext = query({
         ...code,
         content: code.content || buildQrContent(code.entityType, code.entityId, code.label),
       })),
+      assistantConfig,
       totalNodes: nodes.length,
     };
   },

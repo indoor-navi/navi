@@ -1,13 +1,16 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { startTransition, useState, useRef, useEffect, useCallback } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
+import AdminAuthGate from '@/components/AdminAuthGate';
+import { ADMIN_AUTH_CHANGED_EVENT } from '@/components/authEvents';
+import ManageSettings from '@/components/ManageSettings';
 import {
   Layers, MapPin, Compass, Navigation, Plus, Info, Upload, FileImage,
   Loader2, Link2, ChevronLeft, ChevronRight, Trash2, GripVertical,
-  X, Check, Move
+  X, Check, Move, Bot, Users, LogOut
 } from 'lucide-react';
 
 type LandmarkType = 'corridor' | 'staircase' | 'elevator' | 'double-door';
@@ -19,11 +22,13 @@ interface NodePos {
   y: number;
 }
 
-export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState<'floors' | 'nodes' | 'destinations' | 'connections' | 'qrCodes'>('connections');
+function AdminDashboard() {
+  const [activeTab, setActiveTab] = useState<'floors' | 'nodes' | 'destinations' | 'connections' | 'qrCodes' | 'assistant' | 'settings'>('connections');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const data = useQuery(api.admin.listAllData);
+  const [sessionToken] = useState(() => typeof window === 'undefined' ? '' : window.localStorage.getItem('navi_admin_session') || '');
+  const session = useQuery(api.auth.getSession, { token: sessionToken || undefined });
 
   const insertFloor = useMutation(api.admin.addFloor);
   const updateFloor = useMutation(api.admin.updateFloor);
@@ -38,6 +43,8 @@ export default function AdminDashboard() {
   const updateConnection = useMutation(api.admin.updateConnection);
   const deleteConnection = useMutation(api.admin.deleteConnection);
   const getUploadUrl = useMutation(api.admin.generateUploadUrl);
+  const updateAssistantConfig = useMutation(api.admin.updateAssistantConfig);
+  const logout = useMutation(api.auth.logout);
 
   // Forms
   const [floorForm, setFloorForm] = useState({ level: 0, name: '' });
@@ -47,6 +54,23 @@ export default function AdminDashboard() {
     fromNodeId: '', toNodeId: '', videoSegmentUrl: '',
     textDirection: '', audioDescription: '', estimatedWalkingTime: 30
   });
+  const [assistantForm, setAssistantForm] = useState({
+    assistantName: 'NaviSense',
+    personality: 'Warm, welcoming, and conversational. Be concise but friendly.',
+    task: 'Help visitors navigate the building and answer questions about its rooms, facilities, and information.',
+  });
+  useEffect(() => {
+    const config = data?.assistantConfig;
+    if (config) {
+      startTransition(() => {
+        setAssistantForm({
+          assistantName: config.assistantName,
+          personality: config.personality,
+          task: config.task,
+        });
+      });
+    }
+  }, [data?.assistantConfig]);
 
   // Graph canvas
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -74,7 +98,7 @@ export default function AdminDashboard() {
   const uploadToConvex = async (file: File): Promise<string> => {
     setUploading(true);
     try {
-      const url = await getUploadUrl();
+      const url = await getUploadUrl({ token: sessionToken });
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
       if (!res.ok) throw new Error('Upload failed');
       const { storageId } = await res.json();
@@ -178,14 +202,14 @@ export default function AdminDashboard() {
       if (floorFile) url = await uploadToConvex(floorFile);
 
       if (editingFloorId) {
-        await updateFloor({
+        await updateFloor({ token: sessionToken,
           _id: editingFloorId as Id<"floors">,
           level: Number(floorForm.level),
           name: floorForm.name,
           floorPlanUrl: url ?? data?.floors?.find(f => f._id === editingFloorId)?.floorPlanUrl,
         });
       } else {
-        await insertFloor({ level: Number(floorForm.level), name: floorForm.name, floorPlanUrl: url });
+        await insertFloor({ token: sessionToken, level: Number(floorForm.level), name: floorForm.name, floorPlanUrl: url });
       }
 
       resetFloorForm();
@@ -199,7 +223,7 @@ export default function AdminDashboard() {
     setLoading(true);
     try {
       if (editingNodeId) {
-        await updateNode({
+        await updateNode({ token: sessionToken,
           _id: editingNodeId as Id<"nodes">,
           floorId: nodeForm.floorId as Id<"floors">,
           label: nodeForm.label,
@@ -207,7 +231,7 @@ export default function AdminDashboard() {
           landmarkType: nodeForm.isLandmark ? nodeForm.landmarkType : undefined,
         });
       } else {
-        await insertNode({
+        await insertNode({ token: sessionToken,
           floorId: nodeForm.floorId as Id<"floors">,
           label: nodeForm.label,
           isLandmark: nodeForm.isLandmark,
@@ -226,7 +250,7 @@ export default function AdminDashboard() {
     try {
       const aliases = destForm.aliasesRaw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
       if (editingDestinationId) {
-        await updateDestination({
+        await updateDestination({ token: sessionToken,
           _id: editingDestinationId as Id<"destinations">,
           name: destForm.name,
           aliases,
@@ -235,7 +259,7 @@ export default function AdminDashboard() {
           targetNodeId: destForm.targetNodeId as Id<"nodes">,
         });
       } else {
-        await insertDestination({
+        await insertDestination({ token: sessionToken,
           name: destForm.name, aliases,
           floorId: destForm.floorId as Id<"floors">,
           description: destForm.description,
@@ -256,7 +280,7 @@ export default function AdminDashboard() {
     try {
       const fileId = editingConnectionId ? data?.connections?.find(c => c._id === editingConnectionId)?.imageUrl : await uploadToConvex(connFile as File);
       if (editingConnectionId) {
-        await updateConnection({
+        await updateConnection({ token: sessionToken,
           _id: editingConnectionId as Id<"connections">,
           fromNodeId: connForm.fromNodeId as Id<"nodes">,
           toNodeId: connForm.toNodeId as Id<"nodes">,
@@ -267,7 +291,7 @@ export default function AdminDashboard() {
           estimatedWalkingTime: Number(connForm.estimatedWalkingTime),
         });
       } else {
-        await insertConnection({
+        await insertConnection({ token: sessionToken,
           fromNodeId: connForm.fromNodeId as Id<"nodes">,
           toNodeId: connForm.toNodeId as Id<"nodes">,
           imageUrl: fileId || '',
@@ -282,6 +306,19 @@ export default function AdminDashboard() {
     setLoading(false);
   };
 
+  const handleAssistantConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await updateAssistantConfig({ token: sessionToken, ...assistantForm });
+      alert('Assistant configuration saved');
+    } catch (err) {
+      console.error(err);
+      alert('Error saving assistant configuration');
+    }
+    setLoading(false);
+  };
+
   // ─── Sidebar config ───
   const navItems = [
     { key: 'floors' as const, icon: Layers, label: 'Floors', count: data?.floors?.length || 0 },
@@ -289,7 +326,10 @@ export default function AdminDashboard() {
     { key: 'destinations' as const, icon: Compass, label: 'Destinations', count: data?.destinations?.length || 0 },
     { key: 'connections' as const, icon: Navigation, label: 'Graph', count: data?.connections?.length || 0 },
     { key: 'qrCodes' as const, icon: Link2, label: 'QR Codes', count: data?.qrCodes?.length || 0 },
+    { key: 'assistant' as const, icon: Bot, label: 'Assistant', count: data?.assistantConfig ? 1 : 0 },
+    { key: 'settings' as const, icon: Users, label: 'Manage settings', count: 0 },
   ];
+  const visibleNavItems = session?.role === 'admin' ? navItems : navItems.filter(item => item.key !== 'settings' && item.key !== 'assistant');
 
   const selectedNode = positions.find(p => p.id === selectedNodeId);
   const originPos = positions.find(p => p.id === connectingFrom);
@@ -388,22 +428,22 @@ export default function AdminDashboard() {
 
   const handleDeleteFloor = async (id: string) => {
     if (!confirm('Delete this floor and its related data?')) return;
-    await deleteFloor({ _id: id as Id<"floors"> });
+    await deleteFloor({ token: sessionToken, _id: id as Id<"floors"> });
   };
 
   const handleDeleteNode = async (id: string) => {
     if (!confirm('Delete this node and any related edges/destinations?')) return;
-    await deleteNode({ _id: id as Id<"nodes"> });
+    await deleteNode({ token: sessionToken, _id: id as Id<"nodes"> });
   };
 
   const handleDeleteDestination = async (id: string) => {
     if (!confirm('Delete this destination?')) return;
-    await deleteDestination({ _id: id as Id<"destinations"> });
+    await deleteDestination({ token: sessionToken, _id: id as Id<"destinations"> });
   };
 
   const handleDeleteConnection = async (id: string) => {
     if (!confirm('Delete this edge?')) return;
-    await deleteConnection({ _id: id as Id<"connections"> });
+    await deleteConnection({ token: sessionToken, _id: id as Id<"connections"> });
   };
 
   return (
@@ -418,7 +458,7 @@ export default function AdminDashboard() {
         </div>
 
         <nav className="flex-1 py-3 px-2 space-y-1">
-          {navItems.map(item => {
+          {visibleNavItems.map(item => {
             const active = activeTab === item.key;
             return (
               <button
@@ -462,15 +502,48 @@ export default function AdminDashboard() {
             {activeTab === 'destinations' && 'Destination Endpoints'}
             {activeTab === 'connections' && 'Graph Topology Editor'}
             {activeTab === 'qrCodes' && 'QR Code Registry'}
+            {activeTab === 'assistant' && 'Assistant Configuration'}
+            {activeTab === 'settings' && 'Manage Settings'}
           </h1>
-          <div className="text-[10px] font-mono text-neutral-500">
+          <div className="flex shrink-0 items-center gap-3 text-[10px] font-mono text-neutral-500">
+            {session && <span className="hidden text-neutral-300 sm:inline">Signed in as {session.email}</span>}
+            {session && <button type="button" onClick={async () => { await logout({ token: sessionToken }); window.localStorage.removeItem('navi_admin_session'); window.dispatchEvent(new Event(ADMIN_AUTH_CHANGED_EVENT)); }} className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-neutral-700 px-2.5 py-1.5 text-neutral-300 hover:border-cyan-600 hover:text-white" title="Sign out"><LogOut className="size-3.5" />Sign out</button>}
             {data ? `${data.floors.length} floors · ${data.nodes.length} nodes · ${data.connections.length} edges` : 'Loading...'}
           </div>
         </header>
 
         {/* Content */}
-        <div className="flex-1 overflow-auto p-6">
-          {activeTab === 'qrCodes' ? (
+        <div className={`flex-1 overflow-auto p-6 ${session?.role === 'viewer' ? '[&_form]:hidden [&_button]:hidden' : ''}`}>
+          {activeTab === 'settings' ? (
+            <ManageSettings token={sessionToken} />
+          ) : activeTab === 'assistant' ? (
+            <div className="max-w-3xl mx-auto">
+              <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-5">
+                <div className="flex items-center gap-2 mb-1">
+                  <Bot className="size-4 text-cyan-400" />
+                  <h2 className="text-sm font-semibold text-white">LLM personality and task</h2>
+                </div>
+                <p className="text-xs text-neutral-500 mb-5">These values are stored in Convex and used by the voice assistant when building its system prompt.</p>
+                <form onSubmit={handleAssistantConfig} className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Assistant name</label>
+                    <input type="text" value={assistantForm.assistantName} onChange={e => setAssistantForm({ ...assistantForm, assistantName: e.target.value })} className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600" required />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Personality</label>
+                    <textarea value={assistantForm.personality} onChange={e => setAssistantForm({ ...assistantForm, personality: e.target.value })} rows={5} className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600 resize-y" required />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Task</label>
+                    <textarea value={assistantForm.task} onChange={e => setAssistantForm({ ...assistantForm, task: e.target.value })} rows={5} className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600 resize-y" required />
+                  </div>
+                  <button type="submit" disabled={loading} className="w-full bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-xs font-bold py-2.5 rounded-md transition-colors">
+                    {loading ? 'Saving...' : 'Save assistant configuration'}
+                  </button>
+                </form>
+              </div>
+            </div>
+          ) : activeTab === 'qrCodes' ? (
             <div className="max-w-7xl mx-auto">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div>
@@ -887,5 +960,13 @@ export default function AdminDashboard() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function AdminPage() {
+  return (
+    <AdminAuthGate>
+      <AdminDashboard />
+    </AdminAuthGate>
   );
 }

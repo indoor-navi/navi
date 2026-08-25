@@ -48,4 +48,35 @@ export default defineSchema({
     content: v.string(),
     createdAt: v.number(),
   }).index("by_entity", ["entityType", "entityId"]),
+
+  assistantConfig: defineTable({
+    key: v.string(),
+    assistantName: v.string(),
+    personality: v.string(),
+    task: v.string(),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+
+  users: defineTable({
+    email: v.string(),
+    passwordHash: v.string(),
+    role: v.union(v.literal("admin"), v.literal("editor"), v.literal("viewer")),
+    createdAt: v.number(),
+  }).index("by_email", ["email"]),
+
+  sessions: defineTable({
+    userId: v.id("users"),
+    token: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("by_token", ["token"]),
+
+  auditLogs: defineTable({
+    userId: v.optional(v.id("users")),
+    userEmail: v.string(),
+    action: v.string(),
+    entity: v.string(),
+    details: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_createdAt", ["createdAt"]),
 });
