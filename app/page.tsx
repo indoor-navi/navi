@@ -31,7 +31,7 @@ interface SlideData {
   textDirection: string;
   description: string;
   walkingTime: number;
-  image: string;
+  video: string;
   isLandmark: boolean;
   landmarkType?: string;
 }
@@ -152,6 +152,8 @@ RULES:
     }
   }, []);
 
+  const NAVIGATION_STEP_HOLD_MS = 3500;
+
   // ─── Navigation Auto-Advance Effect ───
   useEffect(() => {
     if (appMode !== 'navigation') return;
@@ -161,12 +163,13 @@ RULES:
         setAgentState('thinking');
         setIsThinking(true);
         
-        rewriteDirection(activeSlide).then((clearText) => {
+        rewriteDirection(activeSlide).then(async (clearText) => {
           setRewrittenDirection(clearText);
           setCurrentSystemMessage(clearText);
           setAgentState('navigating');
           setIsThinking(false);
-          
+
+          await new Promise((resolve) => setTimeout(resolve, 1200));
           return speakText(clearText);
         }).then(() => {
           handleNavigationStepComplete();
@@ -310,7 +313,10 @@ RESPOND ONLY IN THIS JSON FORMAT:
         body: JSON.stringify({ text })
       });
 
-      if (!response.ok) throw new Error("TTS API error");
+      if (!response.ok) {
+        console.warn('TTS API unavailable; continuing without spoken narration.');
+        return;
+      }
 
       const audioBuffer = await response.arrayBuffer();
       if (!audioContextRef.current) return;
@@ -331,8 +337,8 @@ RESPOND ONLY IN THIS JSON FORMAT:
       });
 
     } catch (err) {
-      console.error("TTS error:", err);
-      throw err;
+      console.warn('TTS error ignored so the route UI can still keep guiding the user:', err);
+      return;
     } finally {
       if (mediaRecorderRef.current?.state === "paused") {
         mediaRecorderRef.current.resume();
@@ -385,6 +391,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
         setAgentState('navigating');
         setIsThinking(false);
         
+        await new Promise((resolve) => setTimeout(resolve, 600));
         await speakText(groqResult.response);
         
         setVoiceIntentQuery(destinationName.toLowerCase());
@@ -420,7 +427,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
     if (currentNodeIndex < totalSlides - 1) {
       setTimeout(() => {
         setCurrentNodeIndex(prev => prev + 1);
-      }, 1200);
+      }, NAVIGATION_STEP_HOLD_MS);
     } else {
       finishNavigation();
     }
@@ -602,13 +609,14 @@ RESPOND ONLY IN THIS JSON FORMAT:
 
   // ─── Render Helpers ───
   const getCleanAssetUrl = (urlStr: string) => {
-    if (!urlStr) return "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1200";
+    if (!urlStr) return "";
     if (urlStr.startsWith("http://") || urlStr.startsWith("https://") || urlStr.startsWith("data:")) return urlStr;
-    
+
     let baseUrl = process.env.NEXT_PUBLIC_CONVEX_URL || "";
     if (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
-    
+
     const cleanStorageId = urlStr.startsWith("/") ? urlStr.slice(1) : urlStr;
+    if (!baseUrl) return `/api/storage/${cleanStorageId}`;
     return `${baseUrl}/api/storage/${cleanStorageId}`;
   };
 
@@ -616,7 +624,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
     ? liveConvexRoute.slides[currentNodeIndex] 
     : null;
 
-  const fallbackPlaceholder = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1200";
+  const fallbackPlaceholder = "";
 
   const buildQrImageUrl = (content: string) => {
     if (!content) return "";
@@ -634,7 +642,6 @@ RESPOND ONLY IN THIS JSON FORMAT:
     const preferredDestination = spokenDestinationName || liveConvexRoute?.destination || "";
 
     const destinationMatch = buildingContext.qrCodes.find((code: any) => {
-      if (code.entityType !== 'destination') return false;
       return normalizeQrMatch(code.label) === normalizeQrMatch(preferredDestination);
     });
 
@@ -646,21 +653,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
       };
     }
 
-    if (activeSlideNode) {
-      const nodeMatch = buildingContext.qrCodes.find((code: any) =>
-        code.entityType === 'node' && normalizeQrMatch(code.label) === normalizeQrMatch(activeSlideNode.targetNodeLabel)
-      );
-
-      if (nodeMatch) {
-        return {
-          label: nodeMatch.label,
-          content: nodeMatch.content,
-          imageUrl: buildQrImageUrl(nodeMatch.content),
-        };
-      }
-    }
-
-    const fallback = buildingContext.qrCodes.find((code: any) => code.entityType === 'destination');
+    const fallback = buildingContext.qrCodes[0];
     if (!fallback) return null;
 
     return {

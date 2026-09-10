@@ -12,6 +12,7 @@ export default defineSchema({
     floorId: v.id("floors"),
     label: v.string(),
     isLandmark: v.boolean(),
+    videoClipUrl: v.optional(v.string()),
     landmarkType: v.optional(
       v.union(
         v.literal("corridor"),
@@ -25,8 +26,6 @@ export default defineSchema({
   connections: defineTable({
     fromNodeId: v.id("nodes"),
     toNodeId: v.id("nodes"),
-    imageUrl: v.string(),
-    videoSegmentUrl: v.optional(v.string()),
     textDirection: v.string(),
     audioDescription: v.string(),
     estimatedWalkingTime: v.number(),

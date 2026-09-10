@@ -15,7 +15,7 @@ export interface SlideData {
   textDirection: string;
   description: string;
   walkingTime: number;
-  image: string;
+  video: string;
   isLandmark: boolean;
   landmarkType?: string;
 }

@@ -86,6 +86,7 @@ export const addNode = mutation({
     floorId: v.id("floors"),
     label: v.string(),
     isLandmark: v.boolean(),
+    videoClipUrl: v.optional(v.string()),
     landmarkType: v.optional(
       v.union(
         v.literal("corridor"),
@@ -101,24 +102,9 @@ export const addNode = mutation({
       floorId: args.floorId,
       label: args.label,
       isLandmark: args.isLandmark,
+      videoClipUrl: args.videoClipUrl,
       landmarkType: args.landmarkType,
     });
-
-    const existing = await ctx.db
-      .query("qrCodes")
-      .withIndex("by_entity", (q) => q.eq("entityType", "node").eq("entityId", nodeId))
-      .first();
-
-    if (!existing) {
-      const content = `https://navi-mauve-mu.vercel.app/continue?entityType=node&entityId=${encodeURIComponent(String(nodeId))}&label=${encodeURIComponent(args.label)}`;
-      await ctx.db.insert("qrCodes", {
-        entityType: "node",
-        entityId: String(nodeId),
-        label: args.label,
-        content,
-        createdAt: Date.now(),
-      });
-    }
 
     return nodeId;
   },
@@ -131,6 +117,7 @@ export const updateNode = mutation({
     floorId: v.id("floors"),
     label: v.string(),
     isLandmark: v.boolean(),
+    videoClipUrl: v.optional(v.string()),
     landmarkType: v.optional(
       v.union(
         v.literal("corridor"),
@@ -146,20 +133,9 @@ export const updateNode = mutation({
       floorId: args.floorId,
       label: args.label,
       isLandmark: args.isLandmark,
+      videoClipUrl: args.videoClipUrl,
       landmarkType: args.landmarkType,
     });
-
-    const qrCode = await ctx.db
-      .query("qrCodes")
-      .withIndex("by_entity", (q) => q.eq("entityType", "node").eq("entityId", String(args._id)))
-      .first();
-
-    if (qrCode) {
-      await ctx.db.patch(qrCode._id, {
-        label: args.label,
-        content: `https://navi-mauve-mu.vercel.app/continue?entityType=node&entityId=${encodeURIComponent(String(args._id))}&label=${encodeURIComponent(args.label)}`,
-      });
-    }
 
     return args._id;
   },
@@ -189,13 +165,13 @@ export const deleteNode = mutation({
       await ctx.db.delete(destination._id);
     }
 
-    const qrCode = await ctx.db
+    const nodeQrCode = await ctx.db
       .query("qrCodes")
       .withIndex("by_entity", (q) => q.eq("entityType", "node").eq("entityId", String(args._id)))
       .first();
 
-    if (qrCode) {
-      await ctx.db.delete(qrCode._id);
+    if (nodeQrCode) {
+      await ctx.db.delete(nodeQrCode._id);
     }
 
     await ctx.db.delete(args._id);
@@ -301,8 +277,6 @@ export const addConnection = mutation({
     token: v.string(),
     fromNodeId: v.id("nodes"),
     toNodeId: v.id("nodes"),
-    imageUrl: v.string(),
-    videoSegmentUrl: v.optional(v.string()),
     textDirection: v.string(),
     audioDescription: v.string(),
     estimatedWalkingTime: v.number(),
@@ -312,8 +286,6 @@ export const addConnection = mutation({
     return await ctx.db.insert("connections", {
       fromNodeId: args.fromNodeId,
       toNodeId: args.toNodeId,
-      imageUrl: args.imageUrl,
-      videoSegmentUrl: args.videoSegmentUrl,
       textDirection: args.textDirection,
       audioDescription: args.audioDescription,
       estimatedWalkingTime: args.estimatedWalkingTime,
@@ -327,8 +299,6 @@ export const updateConnection = mutation({
     _id: v.id("connections"),
     fromNodeId: v.id("nodes"),
     toNodeId: v.id("nodes"),
-    imageUrl: v.string(),
-    videoSegmentUrl: v.optional(v.string()),
     textDirection: v.string(),
     audioDescription: v.string(),
     estimatedWalkingTime: v.number(),
@@ -338,8 +308,6 @@ export const updateConnection = mutation({
     await ctx.db.patch(args._id, {
       fromNodeId: args.fromNodeId,
       toNodeId: args.toNodeId,
-      imageUrl: args.imageUrl,
-      videoSegmentUrl: args.videoSegmentUrl,
       textDirection: args.textDirection,
       audioDescription: args.audioDescription,
       estimatedWalkingTime: args.estimatedWalkingTime,
@@ -363,21 +331,25 @@ export const ensureQrCodeRecords = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
     await requireEditor(ctx, args.token);
-    const nodes = await ctx.db.query("nodes").collect();
     const destinations = await ctx.db.query("destinations").collect();
 
-    const createQr = async (entityType: "node" | "destination", entityId: string, label: string) => {
+    const nodeQrCodes = await ctx.db.query("qrCodes").filter((q) => q.eq(q.field("entityType"), "node")).collect();
+    for (const qr of nodeQrCodes) {
+      await ctx.db.delete(qr._id);
+    }
+
+    const createQr = async (entityId: string, label: string) => {
       const existing = await ctx.db
         .query("qrCodes")
-        .withIndex("by_entity", (q) => q.eq("entityType", entityType).eq("entityId", entityId))
+        .withIndex("by_entity", (q) => q.eq("entityType", "destination").eq("entityId", entityId))
         .first();
 
       if (existing) return;
 
-      const content = `https://navi-mauve-mu.vercel.app/continue?entityType=${entityType}&entityId=${encodeURIComponent(entityId)}&label=${encodeURIComponent(label)}`;
+      const content = `https://navi-mauve-mu.vercel.app/continue?entityType=destination&entityId=${encodeURIComponent(entityId)}&label=${encodeURIComponent(label)}`;
 
       await ctx.db.insert("qrCodes", {
-        entityType,
+        entityType: "destination",
         entityId,
         label,
         content,
@@ -385,12 +357,8 @@ export const ensureQrCodeRecords = mutation({
       });
     };
 
-    for (const node of nodes) {
-      await createQr("node", String(node._id), node.label);
-    }
-
     for (const destination of destinations) {
-      await createQr("destination", String(destination._id), destination.name);
+      await createQr(String(destination._id), destination.name);
     }
 
     return { created: true };
@@ -404,12 +372,12 @@ export const listAllData = query({
     const nodes = await ctx.db.query("nodes").collect();
     const destinations = await ctx.db.query("destinations").collect();
     const connections = await ctx.db.query("connections").collect();
-    const qrCodes = await ctx.db.query("qrCodes").collect();
+    const qrCodes = (await ctx.db.query("qrCodes").collect()).filter((code) => code.entityType === "destination");
     const assistantConfig = await ctx.db
       .query("assistantConfig")
       .withIndex("by_key", (q) => q.eq("key", "default"))
       .first();
-    
+
     return { floors, nodes, destinations, connections, qrCodes, assistantConfig };
   },
 });
