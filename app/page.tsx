@@ -313,10 +313,6 @@ RESPOND ONLY IN THIS JSON FORMAT:
 
   const speakText = async (text: string): Promise<void> => {
     const apiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY || "";
-    if (!apiKey) {
-      console.error("Deepgram API Key missing");
-      return;
-    }
 
     stopDeepgramTTS();
     setIsOrbSpeaking(true);
@@ -327,50 +323,56 @@ RESPOND ONLY IN THIS JSON FORMAT:
       mediaRecorderRef.current.pause();
     }
 
-    if (audioContextRef.current?.state === 'suspended') {
-      await audioContextRef.current.resume();
-    }
-
     try {
-      const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Token ${apiKey.trim()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ text })
-      });
+      if (apiKey) {
+        const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${apiKey.trim()}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ text })
+        });
 
-      if (!response.ok) {
-        console.warn('TTS API unavailable; continuing without spoken narration.');
-        return;
+        if (response.ok) {
+          const audioContext = audioContextRef.current || new AudioContext();
+          audioContextRef.current = audioContext;
+          if (audioContext.state === 'suspended') await audioContext.resume();
+          const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+
+          await new Promise<void>((resolve) => {
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            currentAudioSourceRef.current = source;
+            source.onended = () => {
+              currentAudioSourceRef.current = null;
+              resolve();
+            };
+            source.start(0);
+          });
+          return;
+        }
+        console.warn(`Deepgram TTS returned ${response.status}; using browser speech.`);
       }
-
-      const audioBuffer = await response.arrayBuffer();
-      if (!audioContextRef.current) return;
-
-      await new Promise<void>((resolve, reject) => {
-        audioContextRef.current!.decodeAudioData(audioBuffer, (decodedBuffer) => {
-          const source = audioContextRef.current!.createBufferSource();
-          source.buffer = decodedBuffer;
-          source.connect(audioContextRef.current!.destination);
-          currentAudioSourceRef.current = source;
-
-          source.onended = () => {
-            currentAudioSourceRef.current = null;
-            resolve();
-          };
-          source.start(0);
-        }, (err) => reject(err));
-      });
-
     } catch (err) {
-      console.warn('TTS error ignored so the route UI can still keep guiding the user:', err);
-      return;
+      console.warn('Deepgram TTS failed; using browser speech.', err);
     } finally {
       if (mediaRecorderRef.current?.state === "paused") {
         mediaRecorderRef.current.resume();
       }
+    }
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      await new Promise<void>((resolve) => {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.95;
+        utterance.pitch = 1;
+        utterance.onend = () => resolve();
+        utterance.onerror = () => resolve();
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+      });
     }
   };
 
