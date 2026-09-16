@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { Bot, Landmark, MessageSquare, Mic, MicOff, Navigation, PlayCircle, Sparkles, Volume2 } from 'lucide-react';
+import { useState } from 'react';
+import { Bot, Landmark, MessageSquare, Mic, MicOff, Navigation, PlayCircle, Send, Sparkles, Volume2 } from 'lucide-react';
 import type { ActiveQrCode, AgentState, AppMode, SlideData } from './types';
 
 interface VoicePanelProps {
@@ -20,6 +21,7 @@ interface VoicePanelProps {
   onClearSequence: () => void;
   onStartStream: () => void;
   onStopStream: () => void;
+  onSubmitText: (text: string) => void;
 }
 
 export default function VoicePanel({
@@ -38,7 +40,18 @@ export default function VoicePanel({
   onClearSequence,
   onStartStream,
   onStopStream,
+  onSubmitText,
 }: VoicePanelProps) {
+  const [typedMessage, setTypedMessage] = useState('');
+
+  const submitTypedMessage = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const message = typedMessage.trim();
+    if (!message) return;
+    onSubmitText(message);
+    setTypedMessage('');
+  };
+
   return (
     <div className="relative flex min-h-screen w-full flex-col items-center justify-between overflow-hidden bg-gradient-to-b from-zinc-950 to-zinc-900/40 px-4 py-5 sm:px-8 sm:py-8 lg:px-10 lg:py-10">
       {activeQrCode && (
@@ -81,6 +94,10 @@ export default function VoicePanel({
       <div className="relative z-20 flex min-h-[200px] w-full max-w-2xl flex-col items-center justify-end gap-3">
         {currentSystemMessage && <div className="message-enter flex w-full max-w-lg items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-sm text-cyan-100 backdrop-blur-sm"><Volume2 className="mt-0.5 size-4 shrink-0 text-cyan-400" /><p className="text-[13px] font-medium leading-relaxed text-white">{currentSystemMessage}</p></div>}
         {appMode === 'navigation' && activeSlideNode && <div className="message-enter flex w-full max-w-lg items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-cyan-100 backdrop-blur-sm"><Navigation className="mt-1 size-4 shrink-0 text-cyan-400" /><div className="flex-1 space-y-1.5"><div className="flex items-center justify-between border-b border-zinc-800/80 pb-1"><span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Step {currentNodeIndex + 1} of {routeSlideCount}</span><div className="flex items-center gap-2">{rewrittenDirection && <span className="inline-flex items-center gap-1 rounded border border-emerald-900 bg-emerald-950/30 px-1.5 py-0.5 font-mono text-[9px] text-emerald-400"><Sparkles className="size-2.5" /> AI Clarified</span>}<span className="rounded border border-cyan-900 bg-cyan-950/40 px-1.5 py-0.5 font-mono text-[10px] font-bold text-cyan-400">{activeSlideNode.walkingTime}s walk</span></div></div><span className="block rounded border border-zinc-900 bg-zinc-950 p-2 text-center font-mono text-xs font-bold text-zinc-400">{currentNodeIndex === 0 && activeSlideNode.originNodeLabel === activeSlideNode.targetNodeLabel ? `Start: ${activeSlideNode.targetNodeLabel}` : activeSlideNode.originNodeLabel === activeSlideNode.targetNodeLabel ? activeSlideNode.targetNodeLabel : `${activeSlideNode.originNodeLabel} ➔ ${activeSlideNode.targetNodeLabel}`}</span><p className="pt-1 text-[13px] font-medium leading-relaxed text-white">&quot;{rewrittenDirection || activeSlideNode.textDirection || (currentNodeIndex === 0 ? `This is the starting point: ${activeSlideNode.targetNodeLabel}.` : '')}&quot;</p>{rewrittenDirection && rewrittenDirection !== activeSlideNode.description && <p className="border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-600">Original: {activeSlideNode.description}</p>}{activeSlideNode.isLandmark && <span className="mt-1 inline-flex items-center gap-1.5 rounded border border-purple-500/20 bg-purple-500/10 px-2 py-0.5 font-mono text-[9px] text-purple-400"><Landmark className="size-3" /> {activeSlideNode.landmarkType || 'Structural Junction'}</span>}</div></div>}
+        <form onSubmit={submitTypedMessage} className="flex w-full max-w-lg items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-2 shadow-xl shadow-black/20 backdrop-blur-sm">
+          <input value={typedMessage} onChange={(event) => setTypedMessage(event.target.value)} disabled={isThinking || isStreaming} placeholder="Type a destination or ask me something..." aria-label="Type a destination or ask NaviSense a question" className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600" />
+          <button type="submit" disabled={!typedMessage.trim() || isThinking || isStreaming} aria-label="Send message" className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-zinc-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30"><Send className="size-4" /></button>
+        </form>
         <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-600">{appMode === 'chat' && <MessageSquare className="size-3" />}{appMode === 'navigation' && <Navigation className="size-3" />}{appMode === 'idle' && 'Ready to listen'}{appMode === 'chat' && 'Conversation Mode'}{appMode === 'navigation' && `Navigating to ${destination || '...'}`}</div>
         <div className="relative flex min-h-[56px] w-full items-center justify-center"><div className="z-30 flex h-20 items-center justify-center gap-4">{appMode === 'navigation' && <button onClick={onClearSequence} className="rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2 font-mono text-[11px] text-zinc-400 transition-all hover:border-zinc-600 hover:text-white">Stop Navigation</button>}{!isStreaming ? <button onClick={onStartStream} className="rounded-full border border-zinc-800 bg-zinc-900 p-4 transition-all hover:scale-105 hover:border-cyan-500"><MicOff className="size-5 text-zinc-500" /></button> : <button onClick={onStopStream} className="rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 p-4 text-white shadow-lg shadow-cyan-500/20 transition-all hover:scale-105"><Mic className="size-5 text-white" /></button>}</div></div>
       </div>

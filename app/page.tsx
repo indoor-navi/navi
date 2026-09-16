@@ -382,10 +382,10 @@ RESPOND ONLY IN THIS JSON FORMAT:
     }
   };
 
-  const handleUserSilenceEndpoint = async () => {
+  const handleUserSilenceEndpoint = async (submittedText?: string) => {
     if (blockAudioProcessingRef.current) return;
 
-    const rawText = accumulatedSpeechRef.current.trim();
+    const rawText = (submittedText ?? accumulatedSpeechRef.current).trim();
     if (!rawText || rawText.length < 2) return;
 
     const cleanText = rawText
@@ -711,6 +711,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
         onClearSequence={clearActiveSequence}
         onStartStream={startWebRtcStream}
         onStopStream={stopWebRtcStream}
+        onSubmitText={(text) => { void handleUserSilenceEndpoint(text); }}
       />
     </div>
   );
