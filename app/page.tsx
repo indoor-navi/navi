@@ -1,10 +1,10 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Mic, MicOff, MapPin, Landmark, Volume2, ArrowRight, MessageSquare, Navigation, Bot, User, Compass, Sparkles } from 'lucide-react';
-import ContentPanel from '@/components/ContentPanel';
 import VoicePanel from '@/components/VoicePanel';
 
 // ─── Types ───
@@ -43,6 +43,7 @@ interface SlideData {
 const GROQ_MODEL_ID = 'openai/gpt-oss-120b';
 
 export default function ConversationalWayfindingUI() {
+  const router = useRouter();
   const [hasMounted, setHasMounted] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [agentState, setAgentState] = useState<AgentState>('offline');
@@ -420,9 +421,9 @@ RESPOND ONLY IN THIS JSON FORMAT:
         
         await new Promise((resolve) => setTimeout(resolve, 600));
         await speakText(groqResult.response);
-        
-        setVoiceIntentQuery(destinationName.toLowerCase());
-        setCurrentNodeIndex(0);
+
+        stopWebRtcStream();
+        router.push(`/directions?destination=${encodeURIComponent(destinationName)}`);
         
       } else {
         setSpokenDestinationName("");
@@ -693,7 +694,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
   if (!hasMounted) return <div className="min-h-screen w-full bg-zinc-950" />;
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-zinc-950 font-sans text-white">
+    <div className="min-h-screen w-full overflow-hidden bg-zinc-950 font-sans text-white">
       <VoicePanel
         activeQrCode={activeQrCode}
         agentState={agentState}
@@ -710,16 +711,6 @@ RESPOND ONLY IN THIS JSON FORMAT:
         onClearSequence={clearActiveSequence}
         onStartStream={startWebRtcStream}
         onStopStream={stopWebRtcStream}
-      />
-      <ContentPanel
-        appMode={appMode}
-        chatMessages={chatMessages}
-        chatScrollRef={chatScrollRef}
-        activeSlideNode={activeSlideNode}
-        currentNodeIndex={currentNodeIndex}
-        route={liveConvexRoute}
-        getAssetUrl={getCleanAssetUrl}
-        fallbackPlaceholder={fallbackPlaceholder}
       />
     </div>
   );
