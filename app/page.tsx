@@ -239,29 +239,56 @@ RESPOND ONLY IN THIS JSON FORMAT:
     ];
 
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const requestBody = {
+        model: GROQ_MODEL_ID,
+        messages,
+        temperature: 0.7,
+        max_tokens: 512,
+        response_format: { type: 'json_object' },
+        reasoning_format: 'hidden'
+      };
+
+      let response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey.trim()}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          model: GROQ_MODEL_ID,
-          messages,
-          temperature: 0.7,
-          max_tokens: 512,
-          response_format: { type: 'json_object' },
-          // GPT OSS 120B is a reasoning model; hide reasoning tokens so they
-          // don't leak into the JSON output. Remove this if you switch to a
-          // non-reasoning model (e.g. qwen/qwen3.6-27b with reasoning_effort: 'none').
-          reasoning_format: 'hidden'
-        })
+        body: JSON.stringify(requestBody)
       });
 
-      if (!response.ok) throw new Error(`Groq API error: ${response.status}`);
+      if (!response.ok && response.status === 400) {
+        // Keep the voice interaction usable if Groq rejects optional model controls.
+        response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey.trim()}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: GROQ_MODEL_ID,
+            messages,
+            temperature: 0.7,
+            max_tokens: 512
+          })
+        });
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Groq API error: ${response.status}${errorBody ? ` - ${errorBody.slice(0, 300)}` : ''}`);
+      }
 
       const data = await response.json();
-      const parsed: GroqIntent = JSON.parse(data.choices[0].message.content);
+      const content = data.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('Groq response did not contain message content');
+      let parsed: GroqIntent;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        // The compatibility request may return normal prose instead of JSON.
+        return { intent: 'chat', destination: null, response: content.trim() };
+      }
       
       if (!parsed.intent || !parsed.response) {
         return { intent: 'chat', destination: null, response: "I'm here to help! Need directions or have questions about the building?" };
