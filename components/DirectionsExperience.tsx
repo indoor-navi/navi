@@ -44,6 +44,29 @@ export default function DirectionsExperience({ initialDestination }: DirectionsE
 
     if (apiKey) {
       try {
+        const malawianVoiceResponse = await fetch('/api/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+
+        if (malawianVoiceResponse.ok) {
+          const audioContext = audioContextRef.current || new AudioContext();
+          audioContextRef.current = audioContext;
+          if (audioContext.state === 'suspended') await audioContext.resume();
+          const audioBuffer = await audioContext.decodeAudioData(await malawianVoiceResponse.arrayBuffer());
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContext.destination);
+          audioSourceRef.current = source;
+          await new Promise<void>((resolve) => {
+            source.onended = () => resolve();
+            source.start();
+          });
+          audioSourceRef.current = null;
+          return;
+        }
+
         const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
           method: 'POST',
           headers: { Authorization: `Token ${apiKey}`, 'Content-Type': 'application/json' },
@@ -74,6 +97,9 @@ export default function DirectionsExperience({ initialDestination }: DirectionsE
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       await new Promise<void>((resolve) => {
         const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = /\b(nditengereni|ndikufuna|ili kuti|ndingapeze|kumene|chipinda|pafupi)\b/i.test(text)
+          ? 'ny-MW'
+          : 'en-US';
         utterance.onend = () => resolve();
         utterance.onerror = () => resolve();
         window.speechSynthesis.speak(utterance);

@@ -213,7 +213,10 @@ Available Destinations/Rooms:
 ${destList}
 
 ADDITIONAL RESPONSE RULES:
-- Respond in the SAME LANGUAGE the user is speaking (English OR Chichewa/Chewa/Nyanja)
+- Detect English and Chichewa/Chewa/Nyanja, including code-switching and accents from speech recognition.
+- Understand Chichewa requests such as "nditengereni ku...", "ndikufuna kupita ku...", "... ili kuti?", and "ndingapeze kuti..." as navigation requests.
+- Respond in the SAME LANGUAGE the user is speaking (English OR Chichewa/Chewa/Nyanja); do not translate Chichewa into English unless asked.
+- When speaking English to a Malawian visitor, use warm, clear Malawian phrasing and spell out directions naturally. Do not caricature an accent or add slang unnecessarily.
 - Use natural language, not robotic
 - If unsure, be honest and helpful
 - Keep responses concise, usually 1-3 sentences
@@ -324,6 +327,28 @@ RESPOND ONLY IN THIS JSON FORMAT:
     }
 
     try {
+      const malawianVoiceResponse = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+
+      if (malawianVoiceResponse.ok) {
+        const audioContext = audioContextRef.current || new AudioContext();
+        audioContextRef.current = audioContext;
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        const audioBuffer = await audioContext.decodeAudioData(await malawianVoiceResponse.arrayBuffer());
+        await new Promise<void>((resolve) => {
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContext.destination);
+          currentAudioSourceRef.current = source;
+          source.onended = () => { currentAudioSourceRef.current = null; resolve(); };
+          source.start(0);
+        });
+        return;
+      }
+
       if (apiKey) {
         const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
           method: 'POST',
@@ -366,6 +391,9 @@ RESPOND ONLY IN THIS JSON FORMAT:
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       await new Promise<void>((resolve) => {
         const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = /\b(nditengereni|ndikufuna|ili kuti|ndingapeze|kumene|chipinda|pafupi)\b/i.test(text)
+          ? 'ny-MW'
+          : 'en-US';
         utterance.rate = 0.95;
         utterance.pitch = 1;
         utterance.onend = () => resolve();
@@ -501,7 +529,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
 
     try {
       const dgSocket = new WebSocket(
-        `wss://api.deepgram.com/v1/listen?model=nova-2&interim_results=true&smart_format=true`, 
+        `wss://api.deepgram.com/v1/listen?model=nova-2&language=multi&interim_results=true&smart_format=true`, 
         ['token', apiKey.trim()]
       );
       dgSocketRef.current = dgSocket;
