@@ -54,17 +54,14 @@ export const createSession = internalMutation({
 
 export const createSeededAdmin = internalMutation({
   args: { email: v.string(), passwordHash: v.string() },
+  returns: v.object({ created: v.boolean(), email: v.string() }),
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", args.email))
       .first();
     if (existing) {
-      await ctx.db.patch(existing._id, {
-        passwordHash: args.passwordHash,
-        role: "admin",
-      });
-      return { created: false, email: existing.email, passwordReset: true };
+      return { created: false, email: existing.email };
     }
 
     await ctx.db.insert("users", {
@@ -74,6 +71,23 @@ export const createSeededAdmin = internalMutation({
       createdAt: Date.now(),
     });
     return { created: true, email: args.email };
+  },
+});
+
+export const resetSeededAdminPassword = internalMutation({
+  args: { email: v.string(), passwordHash: v.string() },
+  returns: v.object({ updated: v.boolean(), email: v.string() }),
+  handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .first();
+    if (!existing || existing.role !== "admin") {
+      throw new Error("Seeded administrator account was not found.");
+    }
+    await ctx.db.patch(existing._id, { passwordHash: args.passwordHash });
+    return { updated: true, email: existing.email };
   },
 });
 

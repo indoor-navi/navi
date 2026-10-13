@@ -2,30 +2,45 @@
 
 import bcrypt from "bcryptjs";
 import { internal } from "./_generated/api";
-import { action } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
-import type { FunctionReference } from "convex/server";
+import { internalAction } from "./_generated/server";
+import { v } from "convex/values";
 
-type CreateSeededAdmin = FunctionReference<
-  "mutation",
-  "internal",
-  { email: string; passwordHash: string },
-  { created: boolean; email: string; passwordReset?: boolean }
->;
-const createSeededAdmin = (internal.auth as unknown as { createSeededAdmin: CreateSeededAdmin }).createSeededAdmin;
-
-const ADMIN_EMAIL = "admin@navi.local";
-const ADMIN_PASSWORD = "NaviAdmin123!";
-
-export const seedAdmin = action({
+export const seedAdmin = internalAction({
   args: {},
-  handler: async (ctx): Promise<{ created: boolean; email: string; passwordReset?: boolean }> => {
-    const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-    const result = await ctx.runMutation(createSeededAdmin, {
-      email: ADMIN_EMAIL,
+  returns: v.object({ created: v.boolean(), email: v.string() }),
+  handler: async (ctx): Promise<{ created: boolean; email: string }> => {
+    const email = (process.env.ADMIN_EMAIL || "admin@navi.local").trim().toLowerCase();
+    const password = process.env.ADMIN_PASSWORD;
+    if (!email.includes("@") || email.length > 254) {
+      throw new Error("ADMIN_EMAIL must be a valid email address.");
+    }
+    if (!password || password.length < 16) {
+      throw new Error("Set ADMIN_PASSWORD to a one-time password of at least 16 characters.");
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    return await ctx.runMutation(internal.auth.createSeededAdmin, {
+      email,
       passwordHash,
     });
-    return result;
+  },
+});
 
+export const rotateSeededAdminPassword = internalAction({
+  args: {},
+  returns: v.object({ updated: v.boolean(), email: v.string() }),
+  handler: async (ctx): Promise<{ updated: boolean; email: string }> => {
+    const email = (process.env.ADMIN_EMAIL || "admin@navi.local").trim().toLowerCase();
+    const password = process.env.ADMIN_PASSWORD;
+    if (!email.includes("@") || email.length > 254) {
+      throw new Error("ADMIN_EMAIL must be a valid email address.");
+    }
+    if (!password || password.length < 16) {
+      throw new Error("Set ADMIN_PASSWORD to a one-time password of at least 16 characters.");
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    return await ctx.runMutation(internal.auth.resetSeededAdminPassword, {
+      email,
+      passwordHash,
+    });
   },
 });
