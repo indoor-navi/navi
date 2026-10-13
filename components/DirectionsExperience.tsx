@@ -1,11 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery } from 'convex/react';
 import { ArrowLeft, Bot, ChevronLeft, ChevronRight, Compass, Landmark, PlayCircle } from 'lucide-react';
 import { api } from '@/convex/_generated/api';
+import DirectionCueOverlay from './DirectionCueOverlay';
 import type { SlideData } from './types';
 
 interface DirectionsExperienceProps {
@@ -19,81 +20,120 @@ function getAssetUrl(url: string) {
   return `${baseUrl}/api/storage/${url.replace(/^\//, '')}`;
 }
 
+function buildNarration(slide: SlideData) {
+  const cleanSentence = (value: string) => value.trim().replace(/[.!?]+$/, '');
+  const origin = cleanSentence(slide.originNodeLabel || 'your current location');
+  const target = cleanSentence(slide.targetNodeLabel || 'the destination');
+  const direction = cleanSentence(slide.description || slide.textDirection);
+  const isStartingPoint = origin === target;
+  const routeLabel = isStartingPoint
+    ? `You are at ${target}`
+    : `From ${origin}, continue toward ${target}`;
+  const action = direction
+    ? cleanSentence(direction)
+    : isStartingPoint
+      ? 'This is your current location. Get ready to follow the next direction'
+      : `Walk from ${origin} toward ${target}`;
+  const landmark = slide.isLandmark && slide.landmarkType
+    ? ` You will pass the ${slide.landmarkType.replace('-', ' ')}`
+    : '';
+  const walkingTime = slide.walkingTime > 0
+    ? ` This part takes about ${slide.walkingTime} seconds`
+    : '';
+
+  return `${routeLabel}. ${action}.${landmark}.${walkingTime}.`
+    .replace(/\.\./g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export default function DirectionsExperience({ initialDestination }: DirectionsExperienceProps) {
   const router = useRouter();
   const [destination, setDestination] = useState(initialDestination);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const narrationRunRef = useRef(0);
   const route = useQuery(api.routes.getWayfindingSequence, { transcriptInput: destination });
   const slides = (route?.slides || []) as SlideData[];
   const activeSlide = slides[selectedIndex];
 
-  const stopNarration = () => {
+  const stopNarration = useCallback(() => {
+    narrationRunRef.current += 1;
     if (audioSourceRef.current) {
       try { audioSourceRef.current.stop(); } catch {}
       audioSourceRef.current.disconnect();
       audioSourceRef.current = null;
     }
     if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
-  };
+  }, []);
 
-  const speakDirection = async (text: string) => {
+  const speakDirection = useCallback(async (text: string) => {
     stopNarration();
+    const narrationRun = narrationRunRef.current;
     const apiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY?.trim();
 
-    if (apiKey) {
-      try {
-        const malawianVoiceResponse = await fetch('/api/speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        });
+    try {
+      const voiceResponse = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (narrationRun !== narrationRunRef.current) return;
 
-        if (malawianVoiceResponse.ok) {
-          const audioContext = audioContextRef.current || new AudioContext();
-          audioContextRef.current = audioContext;
-          if (audioContext.state === 'suspended') await audioContext.resume();
-          const audioBuffer = await audioContext.decodeAudioData(await malawianVoiceResponse.arrayBuffer());
+      if (voiceResponse.ok) {
+        const audioContext = audioContextRef.current || new AudioContext();
+        audioContextRef.current = audioContext;
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        const audioBuffer = await audioContext.decodeAudioData(await voiceResponse.arrayBuffer());
+        if (narrationRun !== narrationRunRef.current) return;
+        await new Promise<void>((resolve) => {
           const source = audioContext.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(audioContext.destination);
           audioSourceRef.current = source;
-          await new Promise<void>((resolve) => {
-            source.onended = () => resolve();
-            source.start();
-          });
-          audioSourceRef.current = null;
-          return;
-        }
+          source.onended = () => {
+            if (audioSourceRef.current === source) audioSourceRef.current = null;
+            resolve();
+          };
+          source.start();
+        });
+        return;
+      }
 
+      if (apiKey) {
         const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
           method: 'POST',
           headers: { Authorization: `Token ${apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
         });
+        if (narrationRun !== narrationRunRef.current) return;
 
         if (response.ok) {
           const audioContext = audioContextRef.current || new AudioContext();
           audioContextRef.current = audioContext;
           if (audioContext.state === 'suspended') await audioContext.resume();
           const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+          if (narrationRun !== narrationRunRef.current) return;
           const source = audioContext.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(audioContext.destination);
           audioSourceRef.current = source;
           await new Promise<void>((resolve) => {
-            source.onended = () => resolve();
+            source.onended = () => {
+              if (audioSourceRef.current === source) audioSourceRef.current = null;
+              resolve();
+            };
             source.start();
           });
-          audioSourceRef.current = null;
           return;
         }
-      } catch {
-        // Fall through to browser speech if Deepgram is unavailable.
       }
+    } catch {
+      // Fall through to browser speech if provider TTS is unavailable.
     }
 
+    if (narrationRun !== narrationRunRef.current) return;
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       await new Promise<void>((resolve) => {
         const utterance = new SpeechSynthesisUtterance(text);
@@ -105,61 +145,40 @@ export default function DirectionsExperience({ initialDestination }: DirectionsE
         window.speechSynthesis.speak(utterance);
       });
     }
-  };
+  }, [stopNarration]);
 
   useEffect(() => {
-    if (!initialDestination || !route || !activeSlide) return;
-    const narration = buildNarration(activeSlide);
-    void speakDirection(narration);
-    return stopNarration;
-  }, [activeSlide, initialDestination, route, selectedIndex, slides.length]);
+    const slide = activeSlide;
+    if (!destination || !slide) return;
 
-  useEffect(() => {
-    if (!initialDestination || !route || slides.length === 0 || !activeSlide) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const stepStartedAt = performance.now();
+    const stepDuration = Math.max((slide.walkingTime || 3.5) * 1000, 3500);
 
-    const durationMs = Math.max((activeSlide.walkingTime || 3.5) * 1000, 3500);
-    const timer = window.setTimeout(() => {
-      if (selectedIndex < slides.length - 1) {
-        setSelectedIndex((index) => index + 1);
-      } else {
-        stopNarration();
-        router.push('/');
-      }
-    }, durationMs);
+    void speakDirection(buildNarration(slide)).then(() => {
+      if (cancelled) return;
+      const remainingTime = Math.max(0, stepDuration - (performance.now() - stepStartedAt));
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        if (selectedIndex < slides.length - 1) {
+          setSelectedIndex((index) => index + 1);
+        } else {
+          router.push('/');
+        }
+      }, remainingTime);
+    });
 
-    return () => window.clearTimeout(timer);
-  }, [activeSlide, initialDestination, route, router, selectedIndex, slides.length]);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      stopNarration();
+    };
+  }, [activeSlide, destination, router, selectedIndex, slides.length, speakDirection, stopNarration]);
 
   const selectDestination = (value: string) => {
     setDestination(value.trim());
     setSelectedIndex(0);
-  };
-
-  const buildNarration = (slide: SlideData) => {
-    const cleanSentence = (value: string) => value.trim().replace(/[.!?]+$/, '');
-    const origin = cleanSentence(slide.originNodeLabel || 'your current location');
-    const target = cleanSentence(slide.targetNodeLabel || 'the destination');
-    const direction = cleanSentence(slide.description || slide.textDirection);
-    const isStartingPoint = origin === target;
-    const routeLabel = isStartingPoint
-      ? `You are at ${target}`
-      : `From ${origin}, continue toward ${target}`;
-    const action = direction
-      ? cleanSentence(direction)
-      : isStartingPoint
-        ? 'This is your current location. Get ready to follow the next direction'
-        : `Walk from ${origin} toward ${target}`;
-    const landmark = slide.isLandmark && slide.landmarkType
-      ? ` You will pass the ${slide.landmarkType.replace('-', ' ')}`
-      : '';
-    const walkingTime = slide.walkingTime > 0
-      ? ` This part takes about ${slide.walkingTime} seconds`
-      : '';
-
-    return `${routeLabel}. ${action}.${landmark}.${walkingTime}.`
-      .replace(/\.\./g, '.')
-      .replace(/\s+/g, ' ')
-      .trim();
   };
 
   return (
@@ -180,6 +199,7 @@ export default function DirectionsExperience({ initialDestination }: DirectionsE
           <div className="flex min-h-[420px] flex-col overflow-hidden rounded-2xl border border-zinc-900 bg-zinc-900/30">
             <div className="relative flex min-h-[320px] flex-1 items-center justify-center bg-black">
               {activeSlide?.video ? <video key={activeSlide.id} src={getAssetUrl(activeSlide.video)} className="h-full max-h-[68vh] w-full object-contain" autoPlay loop muted playsInline controls /> : <div className="flex flex-col items-center gap-3 p-8 text-center text-zinc-500"><Compass className="size-10 text-zinc-700" /><p>{destination ? 'No video clip is available for this step.' : 'Choose a destination to load video directions.'}</p></div>}
+              {activeSlide && <DirectionCueOverlay direction={`${activeSlide.textDirection} ${activeSlide.description}`} />}
               {activeSlide?.isLandmark && <div className="absolute left-4 top-4 flex items-center gap-1.5 rounded-full border border-purple-500/30 bg-zinc-950/90 px-3 py-1.5 font-mono text-[10px] uppercase tracking-widest text-purple-300"><Landmark className="size-3" /> {activeSlide.landmarkType || 'Landmark'}</div>}
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-900 bg-zinc-950 p-4 sm:p-5">

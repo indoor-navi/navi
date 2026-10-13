@@ -53,6 +53,10 @@ export default defineSchema({
     assistantName: v.string(),
     personality: v.string(),
     task: v.string(),
+    auraColorA: v.optional(v.string()),
+    auraColorB: v.optional(v.string()),
+    backgroundColor: v.optional(v.string()),
+    logoStorageId: v.optional(v.id("_storage")),
     updatedAt: v.number(),
   }).index("by_key", ["key"]),
 

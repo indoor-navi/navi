@@ -3,7 +3,7 @@
 import { FormEvent, useState } from 'react';
 import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
+import type { Doc, Id } from '@/convex/_generated/dataModel';
 import { ClipboardList, UserPlus, Users, Trash2 } from 'lucide-react';
 
 interface ManageSettingsProps {
@@ -11,6 +11,8 @@ interface ManageSettingsProps {
 }
 
 type UserRole = 'admin' | 'editor' | 'viewer';
+type ManagedUser = Pick<Doc<'users'>, '_id' | 'email' | 'role'>;
+type AdminAuditLog = Pick<Doc<'auditLogs'>, '_id' | 'action' | 'userEmail' | 'entity' | 'details' | 'createdAt'>;
 
 export default function ManageSettings({ token }: ManageSettingsProps) {
   const [view, setView] = useState<'users' | 'audit'>('users');
@@ -18,8 +20,8 @@ export default function ManageSettings({ token }: ManageSettingsProps) {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('viewer');
   const [message, setMessage] = useState('');
-  const users = useQuery(api.auth.listUsers, { token });
-  const auditLogs = useQuery(api.auth.listAuditLogs, { token });
+  const users = useQuery(api.auth.listUsers, { token }) as ManagedUser[] | undefined;
+  const auditLogs = useQuery(api.auth.listAuditLogs, { token }) as AdminAuditLog[] | undefined;
   const createUser = useAction(api.auth.createUser);
   const resetUserPassword = useAction(api.auth.resetUserPassword);
   const deleteUser = useMutation(api.auth.deleteUser);

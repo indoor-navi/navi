@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useEffectEvent, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Mic, MicOff, MapPin, Landmark, Volume2, ArrowRight, MessageSquare, Navigation, Bot, User, Compass, Sparkles } from 'lucide-react';
 import VoicePanel from '@/components/VoicePanel';
+import type { BuildingContext } from '@/components/types';
 
 // ─── Types ───
 type AgentState = 'offline' | 'listening' | 'thinking' | 'speaking' | 'navigating';
@@ -41,10 +42,23 @@ interface SlideData {
 // Recommended production replacement:  openai/gpt-oss-120b
 // Preview multimodal alternative:      qwen/qwen3.6-27b
 const GROQ_MODEL_ID = 'openai/gpt-oss-120b';
+const subscribeToNothing = () => () => {};
+const getHydratedSnapshot = () => true;
+const getServerSnapshot = () => false;
+const getCurrentTimestamp = () => Date.now();
+
+type WindowWithWebkitAudioContext = Window & { webkitAudioContext?: typeof AudioContext };
+
+const getSpeechPauseDelay = (transcript: string) => {
+  const text = transcript.trim();
+  const soundsIncomplete = /(?:^|\s)(?:and|or|but|because|so|if|when|while|to|at|in|on|the|a|an|with|for|from|of|uh|um|er|ndipo|koma|chifukwa|ku|pa|ndi|ndikufuna|ndikupita|nditengereni|ndingapite|ndingapeze)(?:[.!?,;:]*)$/i.test(text);
+  if (soundsIncomplete) return 4000;
+  return /[.!?]["')\]]?$/.test(text) ? 1800 : 2600;
+};
 
 export default function ConversationalWayfindingUI() {
   const router = useRouter();
-  const [hasMounted, setHasMounted] = useState(false);
+  const hasMounted = useSyncExternalStore(subscribeToNothing, getHydratedSnapshot, getServerSnapshot);
   const [isStreaming, setIsStreaming] = useState(false);
   const [agentState, setAgentState] = useState<AgentState>('offline');
   const [appMode, setAppMode] = useState<AppMode>('idle');
@@ -53,6 +67,7 @@ export default function ConversationalWayfindingUI() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [conversationHistory, setConversationHistory] = useState<Array<{role: string; content: string}>>([]);
   const [currentSystemMessage, setCurrentSystemMessage] = useState<string>("");
+  const [liveTranscript, setLiveTranscript] = useState("");
   
   // Navigation state
   const [voiceIntentQuery, setVoiceIntentQuery] = useState<string>("");
@@ -63,12 +78,14 @@ export default function ConversationalWayfindingUI() {
   // Visual state
   const [isOrbSpeaking, setIsOrbSpeaking] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
+  const [speakingAmplitude, setSpeakingAmplitude] = useState(0);
 
   // Data queries
-  const buildingContext = useQuery(api.routes.getBuildingContext);
+  const buildingContext = useQuery(api.routes.getBuildingContext) as BuildingContext | undefined;
   const liveConvexRoute = useQuery(api.routes.getWayfindingSequence, {
     transcriptInput: voiceIntentQuery
   });
+  const activeNavigationSlideId = liveConvexRoute?.slides?.[currentNodeIndex]?.id;
 
   // Refs
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -78,13 +95,19 @@ export default function ConversationalWayfindingUI() {
   const keepAliveIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const accumulatedSpeechRef = useRef<string>("");
+  const interimSpeechRef = useRef<string>("");
+  const speechRunRef = useRef(0);
+  const navigationSpeechStepRef = useRef<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const speakingAmplitudeIntervalRef = useRef<number | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockAudioProcessingRef = useRef<boolean>(false);
   const isStreamingRef = useRef(isStreaming);
+  const handleUserSilenceEndpointRef = useRef<(submittedText?: string) => Promise<void>>(async () => {});
+  const stopWebRtcStreamRef = useRef<() => void>(() => {});
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { setHasMounted(true); }, []);
   useEffect(() => { isStreamingRef.current = isStreaming; }, [isStreaming]);
   useEffect(() => {
     if (chatScrollRef.current) chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
@@ -155,42 +178,16 @@ RULES:
 
   const NAVIGATION_STEP_HOLD_MS = 3500;
 
-  // ─── Navigation Auto-Advance Effect ───
-  useEffect(() => {
-    if (appMode !== 'navigation') return;
-    if (currentNodeIndex >= 0 && liveConvexRoute?.slides) {
-      const activeSlide: SlideData = liveConvexRoute.slides[currentNodeIndex];
-      if (activeSlide) {
-        setAgentState('thinking');
-        setIsThinking(true);
-        
-        rewriteDirection(activeSlide).then(async (clearText) => {
-          setRewrittenDirection(clearText);
-          setCurrentSystemMessage(clearText);
-          setAgentState('navigating');
-          setIsThinking(false);
-
-          await new Promise((resolve) => setTimeout(resolve, 1200));
-          return speakText(clearText);
-        }).then(() => {
-          handleNavigationStepComplete();
-        }).catch(() => {
-          handleSpeechErrorFallback();
-        });
-      }
-    }
-  }, [currentNodeIndex, liveConvexRoute, appMode, rewriteDirection]);
-
   // ─── Groq LLM Integration ───
   const buildSystemPrompt = useCallback(() => {
     if (!buildingContext) return "";
     
     const destList = buildingContext.destinations
-      .map((d: any) => `- ${d.name} (also called: ${d.aliases.join(", ")})`)
+      .map((d) => `- ${d.name} (also called: ${d.aliases.join(", ")})`)
       .join("\n");
     
     const floorList = buildingContext.floors
-      .map((f: any) => `- ${f.name} (Level ${f.level})`)
+      .map((f) => `- ${f.name} (Level ${f.level})`)
       .join("\n");
 
     const assistantName = buildingContext.assistantConfig?.assistantName || 'NaviSense';
@@ -213,12 +210,16 @@ Available Destinations/Rooms:
 ${destList}
 
 ADDITIONAL RESPONSE RULES:
-- Detect English and Chichewa/Chewa/Nyanja, including code-switching and accents from speech recognition.
+- Understand English and Chichewa/Chewa/Nyanja, including code-switching, varied spelling, and imperfect speech-recognition transcripts.
 - Understand Chichewa requests such as "nditengereni ku...", "ndikufuna kupita ku...", "... ili kuti?", and "ndingapeze kuti..." as navigation requests.
-- Respond in the SAME LANGUAGE the user is speaking (English OR Chichewa/Chewa/Nyanja); do not translate Chichewa into English unless asked.
+- Treat the user message as a speech-recognition transcript: tolerate missing punctuation, repeated words, and phonetic spellings without changing the likely intent.
+- Respond in the same language as the user's latest message, following their language when they code-switch; do not translate Chichewa into English unless asked.
 - When speaking English to a Malawian visitor, use warm, clear Malawian phrasing and spell out directions naturally. Do not caricature an accent or add slang unnecessarily.
-- Use natural language, not robotic
-- If unsure, be honest and helpful
+- Use natural, concise language that is easy to understand when heard aloud.
+- Speak like an attentive human guide: acknowledge the visitor's request briefly, use natural phrasing and contractions, and avoid repetitive greetings or formal/robotic wording.
+- Keep spoken answers easy to follow; avoid markdown, lists, or symbol-heavy wording unless the user asks for details.
+- If a destination or request is unclear, ask one short clarifying question instead of guessing.
+- If unsure about building information, be honest and helpful.
 - Keep responses concise, usually 1-3 sentences
 1. Determine if the user wants directions ("navigate") or is just chatting ("chat")
 2. For "navigate": match their request to the closest destination name EXACTLY as listed above, and give a brief friendly confirmation
@@ -246,7 +247,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
       const requestBody = {
         model: GROQ_MODEL_ID,
         messages,
-        temperature: 0.7,
+        temperature: 0.4,
         max_tokens: 512,
         response_format: { type: 'json_object' },
         reasoning_format: 'hidden'
@@ -272,7 +273,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
           body: JSON.stringify({
             model: GROQ_MODEL_ID,
             messages,
-            temperature: 0.7,
+            temperature: 0.4,
             max_tokens: 512
           })
         });
@@ -307,100 +308,119 @@ RESPOND ONLY IN THIS JSON FORMAT:
 
   // ─── Audio / TTS ───
   const stopDeepgramTTS = () => {
+    speechRunRef.current += 1;
+    if (speakingAmplitudeIntervalRef.current !== null) {
+      window.clearInterval(speakingAmplitudeIntervalRef.current);
+      speakingAmplitudeIntervalRef.current = null;
+    }
+    setSpeakingAmplitude(0);
     if (currentAudioSourceRef.current) {
       try { currentAudioSourceRef.current.stop(); } catch (e) {}
       try { currentAudioSourceRef.current.disconnect(); } catch (e) {}
       currentAudioSourceRef.current = null;
     }
+    if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
   };
 
   const speakText = async (text: string): Promise<void> => {
     const apiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY || "";
+    const chichewaText = /\b(?:nditengereni|ndikufuna|muli bwanji|zikomo|chonde|ili kuti|ndingapeze|kumene|chipinda|pafupi|ndingapite|ndikufuna kupita)\b/i.test(text);
 
     stopDeepgramTTS();
+    const speechRun = speechRunRef.current;
     setIsOrbSpeaking(true);
+    setSpeakingAmplitude(0);
     setAgentState('speaking');
     clearSilenceTimer();
 
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.pause();
-    }
+    const playAudioBuffer = (audioContext: AudioContext, audioBuffer: AudioBuffer) => new Promise<void>((resolve) => {
+      const source = audioContext.createBufferSource();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      const samples = new Float32Array(analyser.fftSize);
+      source.buffer = audioBuffer;
+      source.connect(analyser);
+      analyser.connect(audioContext.destination);
+      currentAudioSourceRef.current = source;
+      speakingAmplitudeIntervalRef.current = window.setInterval(() => {
+        analyser.getFloatTimeDomainData(samples);
+        const rms = Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
+        setSpeakingAmplitude(Math.min(1, rms * 12));
+      }, 40);
+      source.onended = () => {
+        if (speakingAmplitudeIntervalRef.current !== null) {
+          window.clearInterval(speakingAmplitudeIntervalRef.current);
+          speakingAmplitudeIntervalRef.current = null;
+        }
+        analyser.disconnect();
+        if (currentAudioSourceRef.current === source) currentAudioSourceRef.current = null;
+        setSpeakingAmplitude(0);
+        resolve();
+      };
+      source.start(0);
+    });
 
     try {
-      const malawianVoiceResponse = await fetch('/api/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-
-      if (malawianVoiceResponse.ok) {
-        const audioContext = audioContextRef.current || new AudioContext();
-        audioContextRef.current = audioContext;
-        if (audioContext.state === 'suspended') await audioContext.resume();
-        const audioBuffer = await audioContext.decodeAudioData(await malawianVoiceResponse.arrayBuffer());
-        await new Promise<void>((resolve) => {
-          const source = audioContext.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(audioContext.destination);
-          currentAudioSourceRef.current = source;
-          source.onended = () => { currentAudioSourceRef.current = null; resolve(); };
-          source.start(0);
-        });
-        return;
-      }
-
-      if (apiKey) {
-        const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
+      try {
+        const malawianVoiceResponse = await fetch('/api/speak', {
           method: 'POST',
-          headers: {
-            'Authorization': `Token ${apiKey.trim()}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ text })
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
         });
 
-        if (response.ok) {
+        if (speechRun !== speechRunRef.current) return;
+        if (malawianVoiceResponse.ok) {
           const audioContext = audioContextRef.current || new AudioContext();
           audioContextRef.current = audioContext;
           if (audioContext.state === 'suspended') await audioContext.resume();
-          const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-
-          await new Promise<void>((resolve) => {
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-            currentAudioSourceRef.current = source;
-            source.onended = () => {
-              currentAudioSourceRef.current = null;
-              resolve();
-            };
-            source.start(0);
-          });
+          const audioBuffer = await audioContext.decodeAudioData(await malawianVoiceResponse.arrayBuffer());
+          if (speechRun !== speechRunRef.current) return;
+          await playAudioBuffer(audioContext, audioBuffer);
           return;
         }
-        console.warn(`Deepgram TTS returned ${response.status}; using browser speech.`);
-      }
-    } catch (err) {
-      console.warn('Deepgram TTS failed; using browser speech.', err);
-    } finally {
-      if (mediaRecorderRef.current?.state === "paused") {
-        mediaRecorderRef.current.resume();
-      }
-    }
 
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      await new Promise<void>((resolve) => {
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = /\b(nditengereni|ndikufuna|ili kuti|ndingapeze|kumene|chipinda|pafupi)\b/i.test(text)
-          ? 'ny-MW'
-          : 'en-US';
-        utterance.rate = 0.95;
-        utterance.pitch = 1;
-        utterance.onend = () => resolve();
-        utterance.onerror = () => resolve();
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(utterance);
-      });
+        if (apiKey && !chichewaText) {
+          const response = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Token ${apiKey.trim()}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ text })
+          });
+
+          if (response.ok) {
+            const audioContext = audioContextRef.current || new AudioContext();
+            audioContextRef.current = audioContext;
+            if (audioContext.state === 'suspended') await audioContext.resume();
+            const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+            if (speechRun !== speechRunRef.current) return;
+            await playAudioBuffer(audioContext, audioBuffer);
+            return;
+          }
+          console.warn(`Deepgram TTS returned ${response.status}; using browser speech.`);
+        }
+      } catch (err) {
+        console.warn('Deepgram TTS failed; using browser speech.', err);
+      }
+
+      if (speechRun !== speechRunRef.current) return;
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        await new Promise<void>((resolve) => {
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = chichewaText ? 'ny-MW' : 'en-US';
+          utterance.rate = 0.95;
+          utterance.pitch = 1;
+          utterance.onend = () => resolve();
+          utterance.onerror = () => resolve();
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utterance);
+        });
+      }
+    } finally {
+      if (isStreamingRef.current && !explicitDisconnectRef.current && dgSocketRef.current?.readyState === WebSocket.OPEN) {
+        setAgentState('listening');
+      }
     }
   };
 
@@ -429,15 +449,18 @@ RESPOND ONLY IN THIS JSON FORMAT:
     blockAudioProcessingRef.current = true;
     setIsThinking(true);
     setAgentState('thinking');
+    setLiveTranscript("");
+    accumulatedSpeechRef.current = "";
+    interimSpeechRef.current = "";
 
-    const userMsg: ChatMessage = { role: 'user', content: cleanText, timestamp: Date.now() };
+    const userMsg: ChatMessage = { role: 'user', content: cleanText, timestamp: getCurrentTimestamp() };
     setChatMessages(prev => [...prev, userMsg]);
     setConversationHistory(prev => [...prev, { role: 'user', content: cleanText }]);
 
     try {
       const groqResult = await processWithGroq(cleanText);
       
-      const assistantMsg: ChatMessage = { role: 'assistant', content: groqResult.response, timestamp: Date.now() };
+      const assistantMsg: ChatMessage = { role: 'assistant', content: groqResult.response, timestamp: getCurrentTimestamp() };
       setChatMessages(prev => [...prev, assistantMsg]);
       setConversationHistory(prev => [...prev, { role: 'assistant', content: groqResult.response }]);
       setCurrentSystemMessage(groqResult.response);
@@ -452,7 +475,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
         await new Promise((resolve) => setTimeout(resolve, 600));
         await speakText(groqResult.response);
 
-        stopWebRtcStream();
+        stopWebRtcStreamRef.current();
         router.push(`/directions?destination=${encodeURIComponent(destinationName)}`);
         
       } else {
@@ -476,6 +499,9 @@ RESPOND ONLY IN THIS JSON FORMAT:
       setAgentState('listening');
     }
   };
+  useEffect(() => {
+    handleUserSilenceEndpointRef.current = handleUserSilenceEndpoint;
+  });
 
   // ─── Navigation Flow Control ───
   const handleNavigationStepComplete = () => {
@@ -510,20 +536,65 @@ RESPOND ONLY IN THIS JSON FORMAT:
   };
 
   const handleSpeechErrorFallback = () => {
-    if (mediaRecorderRef.current?.state === "paused") {
-      mediaRecorderRef.current.resume();
-    }
     blockAudioProcessingRef.current = false;
     setIsOrbSpeaking(false);
     setIsThinking(false);
     setAgentState(isStreamingRef.current ? 'listening' : 'offline');
   };
 
+  // ─── Navigation Auto-Advance Effect ───
+  const runNavigationStep = useEffectEvent((slideId: string | undefined) => {
+    const activeSlide = liveConvexRoute?.slides?.[currentNodeIndex];
+    if (appMode !== 'navigation' || currentNodeIndex < 0 || !activeSlide || activeSlide.id !== slideId) {
+      navigationSpeechStepRef.current = null;
+      return undefined;
+    }
+
+    const stepKey = `${currentNodeIndex}:${activeSlide.id}`;
+    if (navigationSpeechStepRef.current === stepKey) return undefined;
+    navigationSpeechStepRef.current = stepKey;
+    let cancelled = false;
+
+    setAgentState('thinking');
+    setIsThinking(true);
+
+    rewriteDirection(activeSlide).then(async (clearText) => {
+      if (cancelled) return false;
+      setRewrittenDirection(clearText);
+      setCurrentSystemMessage(clearText);
+      setAgentState('navigating');
+      setIsThinking(false);
+
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      if (cancelled) return false;
+      await speakText(clearText);
+      return !cancelled;
+    }).then((spoken) => {
+      if (spoken && !cancelled) handleNavigationStepComplete();
+    }).catch(() => {
+      if (!cancelled) handleSpeechErrorFallback();
+    });
+
+    return () => {
+      cancelled = true;
+      if (navigationSpeechStepRef.current === stepKey) navigationSpeechStepRef.current = null;
+      stopDeepgramTTS();
+    };
+  });
+
+  useEffect(() => {
+    return runNavigationStep(activeNavigationSlideId);
+  }, [appMode, currentNodeIndex, activeNavigationSlideId]);
+
   // ─── Deepgram STT Connection ───
   const connectToDeepgram = (stream: MediaStream) => {
-    if (dgSocketRef.current) return;
+    if (dgSocketRef.current?.readyState === WebSocket.OPEN || dgSocketRef.current?.readyState === WebSocket.CONNECTING) return;
     const apiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY || "";
-    if (!apiKey) return;
+    if (!apiKey) {
+      setAgentState('offline');
+      setCurrentSystemMessage('Speech recognition is not configured. Add the Deepgram API key to enable voice conversations.');
+      return;
+    }
 
     setAgentState('listening');
 
@@ -535,48 +606,85 @@ RESPOND ONLY IN THIS JSON FORMAT:
       dgSocketRef.current = dgSocket;
 
       dgSocket.onopen = () => {
+        if (explicitDisconnectRef.current || dgSocketRef.current !== dgSocket) {
+          dgSocket.close();
+          return;
+        }
         if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
         keepAliveIntervalRef.current = setInterval(() => {
-          if (dgSocketRef.current?.readyState === WebSocket.OPEN) {
-            dgSocketRef.current.send(JSON.stringify({ type: "KeepAlive" }));
+          if (dgSocket.readyState === WebSocket.OPEN) {
+            dgSocket.send(JSON.stringify({ type: "KeepAlive" }));
           }
         }, 7000);
 
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.ondataavailable = null;
+          mediaRecorderRef.current.stop();
+        }
         const audioOnlyStream = new MediaStream(stream.getAudioTracks());
-        mediaRecorderRef.current = new MediaRecorder(audioOnlyStream);
-        mediaRecorderRef.current.ondataavailable = (event) => {
-          if (blockAudioProcessingRef.current) return;
-          if (event.data?.size > 0 && dgSocketRef.current?.readyState === WebSocket.OPEN) {
-            dgSocketRef.current.send(event.data);
+        const recorder = new MediaRecorder(audioOnlyStream);
+        mediaRecorderRef.current = recorder;
+        recorder.ondataavailable = (event) => {
+          if (blockAudioProcessingRef.current || dgSocketRef.current !== dgSocket) return;
+          if (event.data?.size > 0 && dgSocket.readyState === WebSocket.OPEN) {
+            dgSocket.send(event.data);
           }
         };
-        mediaRecorderRef.current.start(250);
+        recorder.start(250);
+        setAgentState(blockAudioProcessingRef.current ? 'thinking' : 'listening');
       };
 
       dgSocket.onmessage = (message) => {
-        if (blockAudioProcessingRef.current) return;
+        if (blockAudioProcessingRef.current || dgSocketRef.current !== dgSocket) return;
 
         try {
           const receivedData = JSON.parse(message.data);
           const transcript = receivedData.channel?.alternatives[0]?.transcript;
 
           if (transcript?.trim()) {
-            accumulatedSpeechRef.current = transcript.trim();
+            if (receivedData.is_final) {
+              accumulatedSpeechRef.current = [accumulatedSpeechRef.current, transcript.trim()].filter(Boolean).join(' ');
+              interimSpeechRef.current = "";
+            } else {
+              interimSpeechRef.current = transcript.trim();
+            }
+
+            const visibleTranscript = [accumulatedSpeechRef.current, interimSpeechRef.current].filter(Boolean).join(' ');
+            setLiveTranscript(visibleTranscript);
             
             clearSilenceTimer();
             silenceTimerRef.current = setTimeout(() => {
-              handleUserSilenceEndpoint();
-            }, 1400);
+              const completeTranscript = [accumulatedSpeechRef.current, interimSpeechRef.current].filter(Boolean).join(' ');
+              void handleUserSilenceEndpointRef.current(completeTranscript);
+            }, getSpeechPauseDelay(visibleTranscript));
           }
-        } catch (parseErr) {}
+        } catch (parseErr) {
+          console.error('Unable to parse speech recognition response.', parseErr);
+        }
       };
 
-      dgSocket.onclose = () => {
+      dgSocket.onclose = (event) => {
+        if (dgSocketRef.current !== dgSocket) return;
         if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
+        keepAliveIntervalRef.current = null;
+        const recorder = mediaRecorderRef.current;
+        if (recorder && recorder.state !== 'inactive') {
+          recorder.ondataavailable = null;
+          recorder.stop();
+        }
+        mediaRecorderRef.current = null;
         dgSocketRef.current = null;
         
         if (!explicitDisconnectRef.current) {
           setAgentState('offline');
+          if (event.code === 1008) {
+            setCurrentSystemMessage('Speech recognition rejected the connection. Check the Deepgram API key and microphone configuration.');
+            explicitDisconnectRef.current = true;
+            localStreamRef.current?.getTracks().forEach(track => track.stop());
+            localStreamRef.current = null;
+            setIsStreaming(false);
+            return;
+          }
           
           if (typeof window !== 'undefined' && !navigator.onLine) {
             const handleOnline = () => {
@@ -589,25 +697,46 @@ RESPOND ONLY IN THIS JSON FORMAT:
             return;
           }
 
-          setTimeout(() => {
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectTimeoutRef.current = null;
             if (!explicitDisconnectRef.current && localStreamRef.current) {
               connectToDeepgram(localStreamRef.current);
             }
           }, 2000);
         }
       };
-    } catch (e) {}
+      dgSocket.onerror = () => {
+        if (!explicitDisconnectRef.current && dgSocket.readyState !== WebSocket.CLOSED) dgSocket.close();
+      };
+    } catch (error) {
+      console.error('Unable to establish speech recognition connection.', error);
+      setAgentState('offline');
+      setCurrentSystemMessage('Speech recognition connection failed. Reconnecting…');
+      if (!explicitDisconnectRef.current && stream.active) {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectTimeoutRef.current = null;
+          connectToDeepgram(stream);
+        }, 2000);
+      }
+    }
   };
 
   // ─── Stream Controls ───
   const startWebRtcStream = async () => {
     try {
+      if (!process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY?.trim()) {
+        throw new Error('Speech recognition is not configured. Add the Deepgram API key to enable voice conversations.');
+      }
       explicitDisconnectRef.current = false;
       setIsStreaming(true);
       accumulatedSpeechRef.current = "";
+      interimSpeechRef.current = "";
+      setLiveTranscript("");
       
       if (typeof window !== 'undefined') {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const AudioContextConstructor = window.AudioContext || (window as WindowWithWebkitAudioContext).webkitAudioContext;
+        if (AudioContextConstructor) audioContextRef.current = new AudioContextConstructor();
       }
       
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -615,9 +744,12 @@ RESPOND ONLY IN THIS JSON FORMAT:
       });
       localStreamRef.current = stream;
       connectToDeepgram(stream);
-    } catch (err) {
+    } catch (error) {
+      localStreamRef.current?.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
       setIsStreaming(false);
       setAgentState('offline');
+      setCurrentSystemMessage(error instanceof Error ? error.message : 'Microphone access could not be started. Allow microphone access in your browser settings and try again.');
     }
   };
 
@@ -625,11 +757,19 @@ RESPOND ONLY IN THIS JSON FORMAT:
     explicitDisconnectRef.current = true;
     clearSilenceTimer();
     if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
-    if (mediaRecorderRef.current?.state !== 'inactive') {
-      try { mediaRecorderRef.current?.stop(); } catch(e){}
+    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    reconnectTimeoutRef.current = null;
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.ondataavailable = null;
+      try { recorder.stop(); } catch (error) {
+        console.error('Unable to stop microphone recorder.', error);
+      }
     }
     dgSocketRef.current?.close();
     localStreamRef.current?.getTracks().forEach(track => track.stop());
+    mediaRecorderRef.current = null;
+    localStreamRef.current = null;
     
     stopDeepgramTTS();
 
@@ -642,9 +782,14 @@ RESPOND ONLY IN THIS JSON FORMAT:
     setRewrittenDirection("");
     blockAudioProcessingRef.current = false;
     accumulatedSpeechRef.current = "";
+    interimSpeechRef.current = "";
+    setLiveTranscript("");
     setAppMode('idle');
     setCurrentSystemMessage("");
   };
+  useEffect(() => {
+    stopWebRtcStreamRef.current = stopWebRtcStream;
+  });
 
   const clearActiveSequence = () => {
     clearSilenceTimer();
@@ -656,14 +801,34 @@ RESPOND ONLY IN THIS JSON FORMAT:
     setRewrittenDirection("");
     blockAudioProcessingRef.current = false;
     accumulatedSpeechRef.current = "";
+    interimSpeechRef.current = "";
+    setLiveTranscript("");
     setAgentState(isStreamingRef.current ? 'listening' : 'offline');
     setAppMode('chat');
     setCurrentSystemMessage("");
     stopDeepgramTTS();
-    if (mediaRecorderRef.current?.state === "paused") {
-      mediaRecorderRef.current.resume();
-    }
   };
+
+  useEffect(() => {
+    return () => {
+      explicitDisconnectRef.current = true;
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (keepAliveIntervalRef.current) clearInterval(keepAliveIntervalRef.current);
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') {
+        recorder.ondataavailable = null;
+        recorder.stop();
+      }
+      dgSocketRef.current?.close();
+      localStreamRef.current?.getTracks().forEach(track => track.stop());
+      if (speakingAmplitudeIntervalRef.current !== null) window.clearInterval(speakingAmplitudeIntervalRef.current);
+      try { currentAudioSourceRef.current?.stop(); } catch (error) {
+        console.error('Unable to stop audio playback during cleanup.', error);
+      }
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
 
   // ─── Render Helpers ───
   const getCleanAssetUrl = (urlStr: string) => {
@@ -699,7 +864,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
 
     const preferredDestination = spokenDestinationName || liveConvexRoute?.destination || "";
 
-    const destinationMatch = buildingContext.qrCodes.find((code: any) => {
+    const destinationMatch = buildingContext.qrCodes.find((code) => {
       return normalizeQrMatch(code.label) === normalizeQrMatch(preferredDestination);
     });
 
@@ -733,11 +898,18 @@ RESPOND ONLY IN THIS JSON FORMAT:
         currentNodeIndex={currentNodeIndex}
         routeSlideCount={liveConvexRoute?.slides.length}
         currentSystemMessage={currentSystemMessage}
+        chatMessages={chatMessages}
+        liveTranscript={liveTranscript}
         rewrittenDirection={rewrittenDirection}
         isOrbSpeaking={isOrbSpeaking}
         isThinking={isThinking}
         isStreaming={isStreaming}
+        speakingAmplitude={speakingAmplitude}
         destination={liveConvexRoute?.destination}
+        assistantLogoUrl={buildingContext?.assistantLogoUrl}
+        auraColorA={buildingContext?.assistantConfig?.auraColorA}
+        auraColorB={buildingContext?.assistantConfig?.auraColorB}
+        backgroundColor={buildingContext?.assistantConfig?.backgroundColor}
         onClearSequence={clearActiveSequence}
         onStartStream={startWebRtcStream}
         onStopStream={stopWebRtcStream}

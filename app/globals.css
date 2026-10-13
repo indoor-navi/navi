@@ -24,3 +24,34 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@keyframes voice-line-scroll {
+  from { transform: translateX(100cqw); }
+  to { transform: translateX(-100%); }
+}
+
+.voice-line-window {
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+.voice-line-track {
+  animation: voice-line-scroll var(--voice-line-duration, 18s) linear infinite;
+  width: max-content;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-line-window {
+    container-type: normal;
+  }
+
+  .voice-line-track {
+    animation: none;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transform: none;
+    width: 100%;
+  }
+}

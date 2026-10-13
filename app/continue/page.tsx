@@ -1,9 +1,24 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { BuildingContext } from '@/components/types';
 import { ArrowRight, Camera, MapPin, Navigation, Sparkles } from 'lucide-react';
+
+interface BrowserBarcodeDetector {
+  detect(source: HTMLVideoElement): Promise<Array<{ rawValue?: string }>>;
+}
+
+type BrowserBarcodeDetectorConstructor = new (options: { formats: string[] }) => BrowserBarcodeDetector;
+type WindowWithBarcodeDetector = Window & {
+  BarcodeDetector?: BrowserBarcodeDetectorConstructor;
+  barcodeDetector?: BrowserBarcodeDetectorConstructor;
+};
+
+const subscribeToNothing = () => () => {};
+const getHydratedSnapshot = () => true;
+const getServerSnapshot = () => false;
 
 function getQueryParam(name: string) {
   if (typeof window === 'undefined') return '';
@@ -12,28 +27,27 @@ function getQueryParam(name: string) {
 }
 
 export default function ContinueRoutePage() {
-  const [mounted, setMounted] = useState(false);
+  const mounted = useSyncExternalStore(subscribeToNothing, getHydratedSnapshot, getServerSnapshot);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState('Scanning white QR markers...');
   const [scannerReady, setScannerReady] = useState(false);
-  const [voiceCue, setVoiceCue] = useState('Ready for directions.');
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const barcodeDetectorRef = useRef<any>(null);
+  const barcodeDetectorRef = useRef<BrowserBarcodeDetector | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const entityType = getQueryParam('entityType');
   const entityId = getQueryParam('entityId');
   const label = getQueryParam('label');
 
-  const buildingContext = useQuery(api.routes.getBuildingContext);
+  const buildingContext = useQuery(api.routes.getBuildingContext) as BuildingContext | undefined;
   const destinationName = useMemo(() => {
     if (!buildingContext) return label || 'Destination';
     if (entityType === 'destination' && entityId) {
-      const match = buildingContext.destinations.find((destination: any) => destination._id === entityId);
+      const match = buildingContext.destinations.find((destination) => destination._id === entityId);
       if (match) return match.name;
     }
     if (entityType === 'node' && entityId) {
-      const match = buildingContext.nodes.find((node: any) => node._id === entityId);
+      const match = buildingContext.nodes.find((node) => node._id === entityId);
       if (match) return match.label;
     }
     return label || 'Destination';
@@ -42,10 +56,6 @@ export default function ContinueRoutePage() {
   const route = useQuery(api.routes.getWayfindingSequence, {
     transcriptInput: destinationName || label || 'destination',
   });
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (!mounted || typeof navigator === 'undefined') return;
@@ -66,7 +76,8 @@ export default function ContinueRoutePage() {
           await videoRef.current.play();
         }
 
-        const BarcodeDetectorCtor = (window as any).BarcodeDetector || (window as any).barcodeDetector;
+        const browserWindow = window as WindowWithBarcodeDetector;
+        const BarcodeDetectorCtor = browserWindow.BarcodeDetector || browserWindow.barcodeDetector;
         if (BarcodeDetectorCtor) {
           try {
             barcodeDetectorRef.current = new BarcodeDetectorCtor({ formats: ['qr_code'] });
@@ -97,7 +108,8 @@ export default function ContinueRoutePage() {
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !scannerReady || !barcodeDetectorRef.current) return;
+    const detector = barcodeDetectorRef.current;
+    if (!video || !scannerReady || !detector) return;
 
     let cancelled = false;
 
@@ -105,7 +117,7 @@ export default function ContinueRoutePage() {
       if (cancelled || !video.videoWidth || !video.videoHeight) return;
 
       try {
-        const codes = await barcodeDetectorRef.current.detect(video);
+        const codes = await detector.detect(video);
         if (!codes?.length) return;
 
         const code = codes[0];
@@ -141,10 +153,7 @@ export default function ContinueRoutePage() {
     : 'Calculating best path...';
 
   const voiceText = nextStep?.textDirection || nextStep?.description || `Continue toward ${destinationName}.`;
-  useEffect(() => {
-    if (!voiceText) return;
-    setVoiceCue(voiceText);
-  }, [voiceText]);
+  const voiceCue = voiceText;
 
   const arrowRotation = nextStep?.textDirection?.toLowerCase().includes('left')
     ? '-45deg'

@@ -2,8 +2,9 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
-import { Bot, Landmark, MessageSquare, Mic, MicOff, Navigation, PlayCircle, Send, Sparkles, Volume2 } from 'lucide-react';
-import type { ActiveQrCode, AgentState, AppMode, SlideData } from './types';
+import { Bot, Landmark, Navigation, PlayCircle, Send, User, Volume2 } from 'lucide-react';
+import VoiceAuraScene from './VoiceAuraScene';
+import type { ActiveQrCode, AgentState, AppMode, ChatMessage, SlideData } from './types';
 
 interface VoicePanelProps {
   activeQrCode: ActiveQrCode | null;
@@ -13,11 +14,18 @@ interface VoicePanelProps {
   currentNodeIndex: number;
   routeSlideCount?: number;
   currentSystemMessage: string;
+  chatMessages: ChatMessage[];
+  liveTranscript: string;
   rewrittenDirection: string;
   isOrbSpeaking: boolean;
   isThinking: boolean;
   isStreaming: boolean;
+  speakingAmplitude: number;
   destination?: string;
+  assistantLogoUrl?: string | null;
+  auraColorA?: string;
+  auraColorB?: string;
+  backgroundColor?: string;
   onClearSequence: () => void;
   onStartStream: () => void;
   onStopStream: () => void;
@@ -32,11 +40,18 @@ export default function VoicePanel({
   currentNodeIndex,
   routeSlideCount,
   currentSystemMessage,
+  chatMessages,
+  liveTranscript,
   rewrittenDirection,
   isOrbSpeaking,
   isThinking,
   isStreaming,
+  speakingAmplitude,
   destination,
+  assistantLogoUrl,
+  auraColorA,
+  auraColorB,
+  backgroundColor,
   onClearSequence,
   onStartStream,
   onStopStream,
@@ -53,7 +68,7 @@ export default function VoicePanel({
   };
 
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center justify-between overflow-hidden bg-gradient-to-b from-zinc-950 to-zinc-900/40 px-4 py-5 sm:px-8 sm:py-8 lg:px-10 lg:py-10">
+    <div className="relative flex h-dvh w-full flex-col items-center overflow-hidden px-4 py-3 sm:px-8 sm:py-5 lg:px-10" style={{ backgroundColor: backgroundColor || '#09090b' }}>
       {activeQrCode && (
         <div className="absolute bottom-4 left-4 z-30 flex items-end gap-3 rounded-2xl border border-cyan-500/20 bg-zinc-950/90 p-3 shadow-2xl shadow-cyan-950/20 backdrop-blur-md">
           <div className="flex h-24 w-24 items-center justify-center rounded-xl border border-zinc-800 bg-white p-2">
@@ -67,39 +82,49 @@ export default function VoicePanel({
         </div>
       )}
 
-      <header className="z-20 flex w-full max-w-6xl items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600"><Bot className="size-5 text-white" /></div>
-          <div className="flex flex-col"><span className="text-lg font-black tracking-tight uppercase">NaviSense</span><span className="font-mono text-[10px] tracking-widest text-zinc-500">CONVERSATIONAL AI</span></div>
+      <header className="z-20 grid w-full max-w-6xl shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)] items-center gap-2 sm:gap-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600">{assistantLogoUrl ? <img src={assistantLogoUrl} alt="NaviSense logo" className="size-full object-contain" /> : <Bot className="size-5 text-white" />}</div>
+          <div className="flex min-w-0 flex-col"><span className="truncate text-sm font-black tracking-tight uppercase sm:text-lg">NaviSense</span><span className="hidden font-mono text-[10px] tracking-widest text-zinc-500 sm:block">CONVERSATIONAL AI</span></div>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href={destination ? `/directions?destination=${encodeURIComponent(destination)}` : '/directions'} aria-label="Open video directions" className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition hover:border-cyan-500/50 hover:text-cyan-300">
+        <form onSubmit={submitTypedMessage} className="mx-auto flex w-full min-w-0 max-w-md items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 p-1 shadow-xl shadow-black/20 backdrop-blur-sm sm:gap-2 sm:rounded-2xl sm:p-2">
+          <input value={typedMessage} onChange={(event) => setTypedMessage(event.target.value)} disabled={isThinking || isStreaming} placeholder="Destination or question..." aria-label="Enter a destination or ask NaviSense a question" className="min-w-0 flex-1 bg-transparent px-2 py-2 text-xs text-white outline-none placeholder:text-zinc-600 sm:px-3 sm:text-sm" />
+          <button type="submit" disabled={!typedMessage.trim() || isThinking || isStreaming} aria-label="Send destination or question" className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-cyan-500 text-zinc-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30 sm:size-9 sm:rounded-xl"><Send className="size-4" /></button>
+        </form>
+        <div className="flex min-w-0 items-center justify-end gap-1.5 sm:gap-2">
+          <Link href={destination ? `/directions?destination=${encodeURIComponent(destination)}` : '/directions'} aria-label="Open video directions" className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900 px-2 py-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition hover:border-cyan-500/50 hover:text-cyan-300 sm:px-3 sm:py-1.5">
             <PlayCircle className="size-3.5" /><span className="hidden sm:inline">Video directions</span>
           </Link>
-          <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider ${agentState === 'listening' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400' : agentState === 'thinking' ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'border-purple-500/30 bg-purple-500/10 text-purple-400' : 'border-zinc-800 bg-zinc-900 text-zinc-600'}`}>
-          <div className={`size-1.5 rounded-full ${agentState === 'listening' ? 'animate-pulse bg-cyan-400' : agentState === 'thinking' ? 'animate-thinking bg-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'animate-pulse bg-purple-400' : 'bg-zinc-600'}`} />
-          {agentState === 'listening' ? 'Listening' : agentState === 'thinking' ? 'Thinking' : agentState === 'speaking' ? 'Speaking' : agentState === 'navigating' ? 'Navigating' : 'Offline'}
+          <div aria-label={`NaviSense ${agentState}`} className={`hidden items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider md:flex ${agentState === 'listening' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400' : agentState === 'thinking' ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'border-purple-500/30 bg-purple-500/10 text-purple-400' : 'border-zinc-800 bg-zinc-900 text-zinc-600'}`}>
+            <div className={`size-1.5 rounded-full ${agentState === 'listening' ? 'animate-pulse bg-cyan-400' : agentState === 'thinking' ? 'animate-thinking bg-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'animate-pulse bg-purple-400' : 'bg-zinc-600'}`} />
+            {agentState}
           </div>
         </div>
       </header>
 
-      <div className="relative z-10 my-auto flex w-full max-w-6xl items-center justify-center py-10 sm:py-14">
-        <div className="pointer-events-none absolute h-[240px] w-[240px] rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 opacity-20 blur-3xl" />
-        <div className={`pointer-events-none absolute h-[210px] w-[210px] rounded-full bg-gradient-to-tr from-blue-600 via-purple-500 to-cyan-400 transition-all duration-300 animate-sweep-clockwise ${isOrbSpeaking ? 'animate-speaking-ball' : ''}`} style={{ opacity: isStreaming || isOrbSpeaking ? 0.85 : 0.15 }} />
-        <div className="absolute flex size-[140px] flex-col items-center justify-center rounded-full border border-zinc-900 bg-zinc-950 shadow-[inset_0_4px_20px_rgba(0,0,0,0.95)] sm:size-[160px]">
-          <div className="relative flex flex-col items-center justify-center"><div className="flex w-24 items-center justify-between px-2"><div className={`size-2.5 rounded-full bg-cyan-400 ${agentState === 'listening' ? 'animate-pulse' : isOrbSpeaking ? 'animate-bounce' : ''}`} /><div className={`size-2.5 rounded-full bg-cyan-400 ${agentState === 'listening' ? 'animate-pulse [animation-delay:0.2s]' : isOrbSpeaking ? 'animate-bounce [animation-delay:0.12s]' : ''}`} /></div><div className="mt-4 flex h-10 items-center justify-center">{agentState === 'thinking' || isThinking ? <div className="flex gap-1"><span className="size-1.5 animate-bounce rounded-full bg-amber-400" /><span className="size-1.5 animate-bounce rounded-full bg-amber-400 [animation-delay:0.1s]" /><span className="size-1.5 animate-bounce rounded-full bg-amber-400 [animation-delay:0.2s]" /></div> : isOrbSpeaking ? <div className="flex h-4 items-center gap-1"><span className="h-4 w-1 animate-pulse rounded-full bg-cyan-400" /><span className="h-6 w-1 animate-pulse rounded-full bg-indigo-400 [animation-delay:0.1s]" /><span className="h-3 w-1 animate-pulse rounded-full bg-purple-400 [animation-delay:0.2s]" /></div> : <div className="h-[2.5px] w-6 animate-pulse rounded-full bg-cyan-400/80" />}</div></div>
-        </div>
+      <div className="relative z-10 flex min-h-0 w-full max-w-6xl flex-1 items-center justify-center">
+        <button type="button" onClick={isStreaming ? onStopStream : onStartStream} aria-label={isStreaming ? 'Stop voice conversation' : 'Start voice conversation'} aria-pressed={isStreaming} className="flex h-[min(52dvh,440px)] max-h-full w-full max-w-[560px] items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950">
+          <VoiceAuraScene agentState={agentState} isStreaming={isStreaming} isOrbSpeaking={isOrbSpeaking} isThinking={isThinking} speakingAmplitude={speakingAmplitude} auraColorA={auraColorA} auraColorB={auraColorB} />
+        </button>
       </div>
 
-      <div className="relative z-20 flex min-h-[200px] w-full max-w-2xl flex-col items-center justify-end gap-3">
-        {currentSystemMessage && <div className="message-enter flex w-full max-w-lg items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-sm text-cyan-100 backdrop-blur-sm"><Volume2 className="mt-0.5 size-4 shrink-0 text-cyan-400" /><p className="text-[13px] font-medium leading-relaxed text-white">{currentSystemMessage}</p></div>}
-        {appMode === 'navigation' && activeSlideNode && <div className="message-enter flex w-full max-w-lg items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-cyan-100 backdrop-blur-sm"><Navigation className="mt-1 size-4 shrink-0 text-cyan-400" /><div className="flex-1 space-y-1.5"><div className="flex items-center justify-between border-b border-zinc-800/80 pb-1"><span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Step {currentNodeIndex + 1} of {routeSlideCount}</span><div className="flex items-center gap-2">{rewrittenDirection && <span className="inline-flex items-center gap-1 rounded border border-emerald-900 bg-emerald-950/30 px-1.5 py-0.5 font-mono text-[9px] text-emerald-400"><Sparkles className="size-2.5" /> AI Clarified</span>}<span className="rounded border border-cyan-900 bg-cyan-950/40 px-1.5 py-0.5 font-mono text-[10px] font-bold text-cyan-400">{activeSlideNode.walkingTime}s walk</span></div></div><span className="block rounded border border-zinc-900 bg-zinc-950 p-2 text-center font-mono text-xs font-bold text-zinc-400">{currentNodeIndex === 0 && activeSlideNode.originNodeLabel === activeSlideNode.targetNodeLabel ? `Start: ${activeSlideNode.targetNodeLabel}` : activeSlideNode.originNodeLabel === activeSlideNode.targetNodeLabel ? activeSlideNode.targetNodeLabel : `${activeSlideNode.originNodeLabel} ➔ ${activeSlideNode.targetNodeLabel}`}</span><p className="pt-1 text-[13px] font-medium leading-relaxed text-white">&quot;{rewrittenDirection || activeSlideNode.textDirection || (currentNodeIndex === 0 ? `This is the starting point: ${activeSlideNode.targetNodeLabel}.` : '')}&quot;</p>{rewrittenDirection && rewrittenDirection !== activeSlideNode.description && <p className="border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-600">Original: {activeSlideNode.description}</p>}{activeSlideNode.isLandmark && <span className="mt-1 inline-flex items-center gap-1.5 rounded border border-purple-500/20 bg-purple-500/10 px-2 py-0.5 font-mono text-[9px] text-purple-400"><Landmark className="size-3" /> {activeSlideNode.landmarkType || 'Structural Junction'}</span>}</div></div>}
-        <form onSubmit={submitTypedMessage} className="flex w-full max-w-lg items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-2 shadow-xl shadow-black/20 backdrop-blur-sm">
-          <input value={typedMessage} onChange={(event) => setTypedMessage(event.target.value)} disabled={isThinking || isStreaming} placeholder="Type a destination or ask me something..." aria-label="Type a destination or ask NaviSense a question" className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600" />
-          <button type="submit" disabled={!typedMessage.trim() || isThinking || isStreaming} aria-label="Send message" className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-zinc-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30"><Send className="size-4" /></button>
-        </form>
-        <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-zinc-600">{appMode === 'chat' && <MessageSquare className="size-3" />}{appMode === 'navigation' && <Navigation className="size-3" />}{appMode === 'idle' && 'Ready to listen'}{appMode === 'chat' && 'Conversation Mode'}{appMode === 'navigation' && `Navigating to ${destination || '...'}`}</div>
-        <div className="relative flex min-h-[56px] w-full items-center justify-center"><div className="z-30 flex h-20 items-center justify-center gap-4">{appMode === 'navigation' && <button onClick={onClearSequence} className="rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2 font-mono text-[11px] text-zinc-400 transition-all hover:border-zinc-600 hover:text-white">Stop Navigation</button>}{!isStreaming ? <button onClick={onStartStream} className="rounded-full border border-zinc-800 bg-zinc-900 p-4 transition-all hover:scale-105 hover:border-cyan-500"><MicOff className="size-5 text-zinc-500" /></button> : <button onClick={onStopStream} className="rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 p-4 text-white shadow-lg shadow-cyan-500/20 transition-all hover:scale-105"><Mic className="size-5 text-white" /></button>}</div></div>
+      <div className="relative z-20 flex max-h-[35dvh] w-full max-w-2xl shrink-0 flex-col items-center gap-2 overflow-hidden">
+        {(chatMessages.length > 0 || liveTranscript) && <div aria-label="Conversation transcript" aria-live="polite" className="flex max-h-[19dvh] min-h-12 w-full max-w-lg flex-col justify-center gap-1 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/90 p-3 backdrop-blur-sm">
+            {[...chatMessages.slice(-3)].reverse().map((message, index) => <div key={`${message.timestamp}-${index}`} className={`flex min-w-0 items-start gap-2 ${message.role === 'user' ? 'text-zinc-300' : 'text-white'}`}>
+              {message.role === 'user' ? <User className="mt-0.5 size-3.5 shrink-0 text-zinc-500" /> : <Bot className="mt-0.5 size-3.5 shrink-0 text-cyan-400" />}
+              <p className="line-clamp-2 min-w-0 text-xs leading-relaxed"><span className="mr-1.5 font-mono text-[9px] uppercase tracking-wider text-zinc-500">{message.role === 'user' ? 'You' : 'NaviSense'}</span>{message.content}</p>
+            </div>)}
+            {liveTranscript && <div className="flex min-w-0 items-start gap-2 text-zinc-400">
+              <User className="mt-0.5 size-3.5 shrink-0 text-cyan-400" />
+              <p className="line-clamp-2 min-w-0 text-xs leading-relaxed"><span className="mr-1.5 font-mono text-[9px] uppercase tracking-wider text-cyan-400">You · listening</span>{liveTranscript}</p>
+            </div>}
+        </div>}
+        {currentSystemMessage && !chatMessages.some((message) => message.role === 'assistant' && message.content === currentSystemMessage) && <div className="message-enter flex w-full max-w-lg items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-cyan-100 backdrop-blur-sm"><Volume2 className="mt-0.5 size-4 shrink-0 text-cyan-400" /><p className="line-clamp-2 text-xs font-medium leading-relaxed text-white">{currentSystemMessage}</p></div>}
+        {appMode === 'navigation' && activeSlideNode && <div className="message-enter flex w-full max-w-lg items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-cyan-100 backdrop-blur-sm"><Navigation className="mt-1 size-4 shrink-0 text-cyan-400" /><div className="min-w-0 flex-1"><div className="mb-1 flex items-center justify-between gap-2"><span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Step {currentNodeIndex + 1} of {routeSlideCount}</span><span className="shrink-0 rounded border border-cyan-900 bg-cyan-950/40 px-1.5 py-0.5 font-mono text-[10px] font-bold text-cyan-400">{activeSlideNode.walkingTime}s walk</span></div><p className="line-clamp-2 text-xs font-medium leading-relaxed text-white">&quot;{rewrittenDirection || activeSlideNode.textDirection || (currentNodeIndex === 0 ? `This is the starting point: ${activeSlideNode.targetNodeLabel}.` : '')}&quot;</p>{activeSlideNode.isLandmark && <span className="mt-1 inline-flex items-center gap-1 rounded border border-purple-500/20 bg-purple-500/10 px-1.5 py-0.5 font-mono text-[9px] text-purple-400"><Landmark className="size-3" /> {activeSlideNode.landmarkType || 'Structural Junction'}</span>}</div></div>}
+        {appMode === 'navigation' && <div className="flex min-h-5 items-center gap-3 font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+          <Navigation className="size-3" />Navigating to {destination || '...'}
+          <button type="button" onClick={onClearSequence} className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[10px] tracking-normal text-zinc-400 transition hover:border-zinc-600 hover:text-white">Stop Navigation</button>
+        </div>}
       </div>
     </div>
   );

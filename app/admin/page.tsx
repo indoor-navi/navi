@@ -3,7 +3,7 @@
 import React, { startTransition, useState, useRef, useEffect, useCallback } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
+import type { Doc, Id } from '@/convex/_generated/dataModel';
 import AdminAuthGate from '@/components/AdminAuthGate';
 import { ADMIN_AUTH_CHANGED_EVENT } from '@/components/authEvents';
 import ManageSettings from '@/components/ManageSettings';
@@ -22,11 +22,20 @@ interface NodePos {
   y: number;
 }
 
+interface AdminDashboardData {
+  floors: Doc<'floors'>[];
+  nodes: Doc<'nodes'>[];
+  destinations: Doc<'destinations'>[];
+  connections: Doc<'connections'>[];
+  qrCodes: Doc<'qrCodes'>[];
+  assistantConfig: Doc<'assistantConfig'> | null;
+}
+
 function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'floors' | 'nodes' | 'destinations' | 'connections' | 'qrCodes' | 'assistant' | 'settings'>('connections');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  const data = useQuery(api.admin.listAllData);
+  const data = useQuery(api.admin.listAllData) as AdminDashboardData | undefined;
   const [sessionToken] = useState(() => typeof window === 'undefined' ? '' : window.localStorage.getItem('navi_admin_session') || '');
   const session = useQuery(api.auth.getSession, { token: sessionToken || undefined });
 
@@ -58,7 +67,15 @@ function AdminDashboard() {
     assistantName: 'NaviSense',
     personality: 'Warm, welcoming, and conversational. Be concise but friendly.',
     task: 'Help visitors navigate the building and answer questions about its rooms, facilities, and information.',
+    auraColorA: '#52e4d1',
+    auraColorB: '#648cff',
+    backgroundColor: '#09090b',
+    logoStorageId: undefined as Id<'_storage'> | undefined,
   });
+  const [assistantLogoFile, setAssistantLogoFile] = useState<File | null>(null);
+  const [removeAssistantLogo, setRemoveAssistantLogo] = useState(false);
+  const [assistantLogoPreview, setAssistantLogoPreview] = useState('');
+  const assistantLogoPreviewUrlRef = useRef<string | null>(null);
   useEffect(() => {
     const config = data?.assistantConfig;
     if (config) {
@@ -67,10 +84,17 @@ function AdminDashboard() {
           assistantName: config.assistantName,
           personality: config.personality,
           task: config.task,
+          auraColorA: config.auraColorA || '#52e4d1',
+          auraColorB: config.auraColorB || '#648cff',
+          backgroundColor: config.backgroundColor || '#09090b',
+          logoStorageId: config.logoStorageId,
         });
       });
     }
   }, [data?.assistantConfig]);
+  useEffect(() => () => {
+    if (assistantLogoPreviewUrlRef.current) URL.revokeObjectURL(assistantLogoPreviewUrlRef.current);
+  }, []);
 
   // Graph canvas
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -123,12 +147,14 @@ function AdminDashboard() {
     if (data?.nodes && positions.length === 0) {
       const nodes = data.nodes;
       const cx = 400, cy = 300, r = Math.min(280, nodes.length * 35);
-      setPositions(nodes.map((n, i) => ({
-        id: n._id,
-        label: n.label,
-        x: cx + r * Math.cos((i / Math.max(nodes.length, 1)) * 2 * Math.PI),
-        y: cy + r * Math.sin((i / Math.max(nodes.length, 1)) * 2 * Math.PI),
-      })));
+      startTransition(() => {
+        setPositions(nodes.map((n, i) => ({
+          id: n._id,
+          label: n.label,
+          x: cx + r * Math.cos((i / Math.max(nodes.length, 1)) * 2 * Math.PI),
+          y: cy + r * Math.sin((i / Math.max(nodes.length, 1)) * 2 * Math.PI),
+        })));
+      });
     }
   }, [data?.nodes]);
 
@@ -325,11 +351,24 @@ function AdminDashboard() {
     e.preventDefault();
     setLoading(true);
     try {
-      await updateAssistantConfig({ token: sessionToken, ...assistantForm });
+      const logoStorageId = assistantLogoFile
+        ? await uploadToConvex(assistantLogoFile) as Id<'_storage'>
+        : assistantForm.logoStorageId;
+      await updateAssistantConfig({
+        token: sessionToken,
+        ...assistantForm,
+        logoStorageId,
+        clearLogo: removeAssistantLogo,
+      });
+      if (assistantLogoPreviewUrlRef.current) URL.revokeObjectURL(assistantLogoPreviewUrlRef.current);
+      assistantLogoPreviewUrlRef.current = null;
+      setAssistantLogoFile(null);
+      setAssistantLogoPreview('');
+      setRemoveAssistantLogo(false);
       alert('Assistant configuration saved');
     } catch (err) {
       console.error(err);
-      alert('Error saving assistant configuration');
+      alert(err instanceof Error ? err.message : 'Error saving assistant configuration');
     }
     setLoading(false);
   };
@@ -355,7 +394,7 @@ function AdminDashboard() {
     return `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(content)}&size=1500x1500&margin=2`;
   };
 
-  const downloadQrCard = async (code: any) => {
+  const downloadQrCard = async (code: Doc<'qrCodes'>) => {
     const qrUrl = buildQrImageUrl(code.content);
     if (!qrUrl) return;
 
@@ -401,13 +440,13 @@ function AdminDashboard() {
     qrImage.src = qrUrl;
   };
 
-  const startEditFloor = (floor: any) => {
+  const startEditFloor = (floor: Doc<'floors'>) => {
     setEditingFloorId(floor._id);
     setFloorForm({ level: floor.level, name: floor.name });
     setFloorFile(null);
   };
 
-  const startEditNode = (node: any) => {
+  const startEditNode = (node: Doc<'nodes'>) => {
     setEditingNodeId(node._id);
     setNodeForm({
       floorId: node.floorId,
@@ -418,7 +457,7 @@ function AdminDashboard() {
     setNodeFile(null);
   };
 
-  const startEditDestination = (destination: any) => {
+  const startEditDestination = (destination: Doc<'destinations'>) => {
     setEditingDestinationId(destination._id);
     setDestForm({
       name: destination.name,
@@ -429,7 +468,7 @@ function AdminDashboard() {
     });
   };
 
-  const startEditConnection = (connection: any) => {
+  const startEditConnection = (connection: Doc<'connections'>) => {
     setEditingConnectionId(connection._id);
     setConnForm({
       fromNodeId: connection.fromNodeId,
@@ -552,8 +591,35 @@ function AdminDashboard() {
                     <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Task</label>
                     <textarea value={assistantForm.task} onChange={e => setAssistantForm({ ...assistantForm, task: e.target.value })} rows={5} className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600 resize-y" required />
                   </div>
-                  <button type="submit" disabled={loading} className="w-full bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-xs font-bold py-2.5 rounded-md transition-colors">
-                    {loading ? 'Saving...' : 'Save assistant configuration'}
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase">Aura color 1<input type="color" value={assistantForm.auraColorA} onChange={e => setAssistantForm({ ...assistantForm, auraColorA: e.target.value })} className="mt-1 h-10 w-full cursor-pointer rounded-md border border-neutral-800 bg-neutral-950 p-1" /></label>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase">Aura color 2<input type="color" value={assistantForm.auraColorB} onChange={e => setAssistantForm({ ...assistantForm, auraColorB: e.target.value })} className="mt-1 h-10 w-full cursor-pointer rounded-md border border-neutral-800 bg-neutral-950 p-1" /></label>
+                    <label className="text-[10px] font-bold text-neutral-500 uppercase">Background color<input type="color" value={assistantForm.backgroundColor} onChange={e => setAssistantForm({ ...assistantForm, backgroundColor: e.target.value })} className="mt-1 h-10 w-full cursor-pointer rounded-md border border-neutral-800 bg-neutral-950 p-1" /></label>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[10px] font-bold uppercase text-neutral-500">NaviSense logo</label>
+                    <div className="flex items-center gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-3">
+                      {(assistantLogoPreview || (!removeAssistantLogo && getStorageAssetUrl(assistantForm.logoStorageId))) && <img src={assistantLogoPreview || getStorageAssetUrl(assistantForm.logoStorageId)} alt="Assistant logo preview" className="size-12 rounded object-contain" />}
+                      <input type="file" accept="image/*" onChange={e => {
+                        const file = e.target.files?.[0] || null;
+                        if (assistantLogoPreviewUrlRef.current) URL.revokeObjectURL(assistantLogoPreviewUrlRef.current);
+                        assistantLogoPreviewUrlRef.current = file ? URL.createObjectURL(file) : null;
+                        setAssistantLogoPreview(assistantLogoPreviewUrlRef.current || '');
+                        setAssistantLogoFile(file);
+                        setRemoveAssistantLogo(false);
+                      }} className="min-w-0 flex-1 text-xs text-neutral-400 file:mr-3 file:rounded file:border-0 file:bg-neutral-800 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white" />
+                      {(assistantForm.logoStorageId || assistantLogoFile) && !removeAssistantLogo && <button type="button" onClick={() => {
+                        if (assistantLogoPreviewUrlRef.current) URL.revokeObjectURL(assistantLogoPreviewUrlRef.current);
+                        assistantLogoPreviewUrlRef.current = null;
+                        setAssistantLogoFile(null);
+                        setAssistantLogoPreview('');
+                        setRemoveAssistantLogo(true);
+                      }} className="shrink-0 text-xs text-red-400 hover:text-red-300">Remove</button>}
+                    </div>
+                    <p className="mt-1 text-[10px] text-neutral-600">Upload an image file to replace the logo shown on the navigation screen.</p>
+                  </div>
+                  <button type="submit" disabled={loading || uploading} className="w-full bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-xs font-bold py-2.5 rounded-md transition-colors">
+                    {uploading ? 'Uploading logo...' : loading ? 'Saving...' : 'Save assistant configuration'}
                   </button>
                 </form>
               </div>
@@ -567,7 +633,7 @@ function AdminDashboard() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => data?.qrCodes?.forEach((code: any) => downloadQrCard(code))}
+                  onClick={() => data?.qrCodes?.forEach((code) => downloadQrCard(code))}
                   className="px-3 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold rounded-md"
                 >
                   Download all
@@ -575,7 +641,7 @@ function AdminDashboard() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-                {(data?.qrCodes || []).map((code: any) => (
+                {(data?.qrCodes || []).map((code) => (
                   <div key={code._id} className="rounded-2xl border border-neutral-800 bg-white p-5 text-black shadow-sm">
                     <div className="flex items-center justify-between mb-3">
                       <span className="text-[10px] font-mono uppercase tracking-[0.26em] text-zinc-500">{code.entityType}</span>
@@ -969,7 +1035,7 @@ function AdminDashboard() {
                       <span className="text-[10px] text-neutral-500">{getNodeLabel(d.targetNodeId)}</span>
                       <p className="text-[11px] text-neutral-400 leading-snug">{d.description}</p>
                       <div className="flex flex-wrap gap-1">
-                        {d.aliases.map((a, i) => <span key={i} className="text-[9px] bg-neutral-800 text-neutral-500 px-1 py-0.5 rounded">"{a}"</span>)}
+                        {d.aliases.map((a, i) => <span key={i} className="text-[9px] bg-neutral-800 text-neutral-500 px-1 py-0.5 rounded">&quot;{a}&quot;</span>)}
                       </div>
                     </div>
                   )))}
