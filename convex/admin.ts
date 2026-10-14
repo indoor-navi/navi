@@ -1,9 +1,10 @@
 // convex/admin.ts
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 
-async function requireEditor(ctx: any, token: string) {
-  const session = await ctx.db.query("sessions").withIndex("by_token", (q: any) => q.eq("token", token)).first();
+async function requireEditor(ctx: MutationCtx, token: string) {
+  const session = await ctx.db.query("sessions").withIndex("by_token", (q) => q.eq("token", token)).first();
   const user = session ? await ctx.db.get(session.userId) : null;
   if (!session || session.expiresAt <= Date.now() || !user || !["admin", "editor"].includes(user.role)) throw new Error("Editor access required");
   await ctx.db.insert("auditLogs", {
@@ -17,7 +18,7 @@ async function requireEditor(ctx: any, token: string) {
   return user;
 }
 
-async function requireAdmin(ctx: any, token: string) {
+async function requireAdmin(ctx: MutationCtx, token: string) {
   const user = await requireEditor(ctx, token);
   if (user.role !== "admin") throw new Error("Admin access required");
   return user;
@@ -398,7 +399,13 @@ export const updateAssistantConfig = mutation({
     assistantName: v.string(),
     personality: v.string(),
     task: v.string(),
+    auraColorA: v.string(),
+    auraColorB: v.string(),
+    backgroundColor: v.string(),
+    logoStorageId: v.optional(v.id("_storage")),
+    clearLogo: v.boolean(),
   },
+  returns: v.id("assistantConfig"),
   handler: async (ctx, args) => {
     const session = await ctx.db.query("sessions").withIndex("by_token", (q) => q.eq("token", args.token)).first();
     const actor = session ? await ctx.db.get(session.userId) : null;
@@ -407,7 +414,17 @@ export const updateAssistantConfig = mutation({
       .query("assistantConfig")
       .withIndex("by_key", (q) => q.eq("key", "default"))
       .first();
-    const values = { assistantName: args.assistantName, personality: args.personality, task: args.task, updatedAt: Date.now() };
+    const values = {
+      assistantName: args.assistantName,
+      personality: args.personality,
+      task: args.task,
+      auraColorA: args.auraColorA,
+      auraColorB: args.auraColorB,
+      backgroundColor: args.backgroundColor,
+      ...(args.clearLogo ? { logoStorageId: undefined } : {}),
+      ...(args.logoStorageId && !args.clearLogo ? { logoStorageId: args.logoStorageId } : {}),
+      updatedAt: Date.now(),
+    };
 
     if (existing) {
       await ctx.db.patch(existing._id, values);

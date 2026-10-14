@@ -1,8 +1,20 @@
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { FunctionReference } from "convex/server";
 
-const authInternal = internal.auth as any;
+type UserRole = "admin" | "editor" | "viewer";
+type AuthInternalApi = {
+  getUserByEmail: FunctionReference<"query", "internal", { email: string }, Doc<"users"> | null>;
+  createSession: FunctionReference<"mutation", "internal", { userId: Id<"users"> }, string>;
+  createSeededAdmin: FunctionReference<"mutation", "internal", { email: string; passwordHash: string }, { created: boolean; email: string; passwordReset?: boolean }>;
+  getUserByToken: FunctionReference<"query", "internal", { token: string }, Doc<"users"> | null>;
+  createUserRecord: FunctionReference<"mutation", "internal", { email: string; passwordHash: string; role: UserRole; actorId: Id<"users"> }, Id<"users">>;
+  resetUserPasswordRecord: FunctionReference<"mutation", "internal", { userId: Id<"users">; passwordHash: string; actorId: Id<"users"> }, { email: string }>;
+};
+
+const authInternal = internal.auth as unknown as AuthInternalApi;
 
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 24;
 
@@ -42,17 +54,14 @@ export const createSession = internalMutation({
 
 export const createSeededAdmin = internalMutation({
   args: { email: v.string(), passwordHash: v.string() },
+  returns: v.object({ created: v.boolean(), email: v.string() }),
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", args.email))
       .first();
     if (existing) {
-      await ctx.db.patch(existing._id, {
-        passwordHash: args.passwordHash,
-        role: "admin",
-      });
-      return { created: false, email: existing.email, passwordReset: true };
+      return { created: false, email: existing.email };
     }
 
     await ctx.db.insert("users", {
@@ -65,9 +74,26 @@ export const createSeededAdmin = internalMutation({
   },
 });
 
+export const resetSeededAdminPassword = internalMutation({
+  args: { email: v.string(), passwordHash: v.string() },
+  returns: v.object({ updated: v.boolean(), email: v.string() }),
+  handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .first();
+    if (!existing || existing.role !== "admin") {
+      throw new Error("Seeded administrator account was not found.");
+    }
+    await ctx.db.patch(existing._id, { passwordHash: args.passwordHash });
+    return { updated: true, email: existing.email };
+  },
+});
+
 export const login = action({
   args: { email: v.string(), password: v.string() },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<{ token: string; user: { email: string; role: UserRole } }> => {
     const bcrypt = await import("bcryptjs");
     const user = await ctx.runQuery(authInternal.getUserByEmail, {
       email: args.email,
@@ -151,7 +177,7 @@ export const listAuditLogs = query({
 
 export const createUser = action({
   args: { token: v.string(), email: v.string(), password: v.string(), role: v.union(v.literal("admin"), v.literal("editor"), v.literal("viewer")) },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<Id<"users">> => {
     const bcrypt = await import("bcryptjs");
     const user = await ctx.runQuery(authInternal.getUserByToken, { token: args.token });
     if (!user || user.role !== "admin") throw new Error("Admin access required");
@@ -187,7 +213,7 @@ export const createUserRecord = internalMutation({
 
 export const resetUserPassword = action({
   args: { token: v.string(), userId: v.id("users"), password: v.string() },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<{ email: string }> => {
     const bcrypt = await import("bcryptjs");
     const actor = await ctx.runQuery(authInternal.getUserByToken, { token: args.token });
     if (!actor || actor.role !== "admin") throw new Error("Admin access required");

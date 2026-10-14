@@ -1,11 +1,12 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
-import { Doc, Id } from "./_generated/dataModel";
+import type { QueryCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
 
-async function resolveVideoUrl(ctx: any, storageId?: string) {
+async function resolveVideoUrl(ctx: QueryCtx, storageId?: string) {
   if (!storageId) return "";
   try {
-    const publicUrl = await ctx.storage.getUrl(storageId);
+    const publicUrl = await ctx.storage.getUrl(storageId as Id<"_storage">);
     return publicUrl || "";
   } catch (storageErr) {
     console.warn(`[Storage Warning]: Could not resolve ${storageId}`);
@@ -26,6 +27,7 @@ function normalizeNodeLabel(label?: string) {
 // ──────────────────────────────────────────
 export const getBuildingContext = query({
   args: {},
+  returns: v.any(),
   handler: async (ctx) => {
     const destinations = await ctx.db.query("destinations").collect();
     const floors = await ctx.db.query("floors").collect();
@@ -35,6 +37,9 @@ export const getBuildingContext = query({
       .query("assistantConfig")
       .withIndex("by_key", (q) => q.eq("key", "default"))
       .first();
+    const assistantLogoUrl = assistantConfig?.logoStorageId
+      ? await ctx.storage.getUrl(assistantConfig.logoStorageId)
+      : null;
 
     const buildQrContent = (entityId: string, label: string) =>
       `https://navi-mauve-mu.vercel.app/continue?entityType=destination&entityId=${encodeURIComponent(entityId)}&label=${encodeURIComponent(label)}`;
@@ -65,6 +70,7 @@ export const getBuildingContext = query({
         content: code.content || buildQrContent(code.entityId, code.label),
       })),
       assistantConfig,
+      assistantLogoUrl,
       totalNodes: nodes.length,
     };
   },
@@ -114,7 +120,7 @@ export const getWayfindingSequence = query({
       "main entrace reception",
     ]);
 
-    let startNode = allNodes.find((node) => {
+    const startNode = allNodes.find((node) => {
       const normalized = normalizeNodeLabel(node.label);
       return normalizedEntranceNames.has(normalized);
     }) || allNodes[0];
@@ -239,7 +245,7 @@ export const getWayfindingSequence = query({
 // Helper: BFS shortest path
 // ──────────────────────────────────────────
 async function findShortestPath(
-  ctx: any,
+  ctx: QueryCtx,
   startNodeId: Id<"nodes">,
   targetNodeId: Id<"nodes">
 ): Promise<Doc<"connections">[] | null> {
@@ -260,7 +266,7 @@ async function findShortestPath(
 
     const outgoingEdges = await ctx.db
       .query("connections")
-      .withIndex("by_fromNode", (q: any) =>
+      .withIndex("by_fromNode", (q) =>
         q.eq("fromNodeId", currentNodeId)
       )
       .collect();
