@@ -12,12 +12,24 @@ type MapOverride = {
 };
 
 type FrameCallback = (time: number, deltaTime: number) => void;
+export type ViewMode = '2d' | '3d';
 
-export async function createFloorScene(container: HTMLElement, modelUrl: string) {
+type SceneOptions = {
+  /** Hide all Ceiling_* meshes so the floor plan is visible from above (admin roof removal). */
+  hideRoof?: boolean;
+};
+
+type PickOptions = { floorsOnly?: boolean };
+
+export async function createFloorScene(container: HTMLElement, modelUrl: string, opts: SceneOptions = {}) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color('#0b1220');
 
   const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 2000);
+  // Top-down orthographic camera used for the 2D plan view (same model, same world coords)
+  const planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 2000);
+  let viewMode: ViewMode = '3d';
+
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -40,6 +52,13 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
   const model = gltf.scene;
   scene.add(model);
 
+  // ── Roof removal: hide every ceiling mesh so the plan is visible from above ──
+  if (opts.hideRoof) {
+    model.traverse((o) => {
+      if (o instanceof THREE.Mesh && /^Ceiling/i.test(o.name)) o.visible = false;
+    });
+  }
+
   const bounds = new THREE.Box3().setFromObject(model);
   const center = bounds.getCenter(new THREE.Vector3());
   const size = bounds.getSize(new THREE.Vector3());
@@ -52,11 +71,52 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
   controls.target.copy(center);
   controls.update();
 
+  const activeCamera = () => (viewMode === '2d' ? planCamera : camera);
+
+  const setViewMode = (mode: ViewMode) => {
+    if (mode === viewMode) return;
+    viewMode = mode;
+    if (mode === '2d') {
+      // Straight above the building, north-up map orientation
+      planCamera.position.set(center.x, bounds.max.y + 60, center.z);
+      planCamera.up.set(0, 0, -1);
+      planCamera.lookAt(center.x, 0, center.z);
+      controls.object = planCamera;
+      controls.enableRotate = false;      // map pan/zoom only
+      controls.screenSpacePanning = false;
+      controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+      controls.minZoom = 0.4;
+      controls.maxZoom = 12;
+      fitPlanCamera();
+    } else {
+      controls.object = camera;
+      controls.enableRotate = true;
+      controls.screenSpacePanning = true;
+      controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+      controls.minZoom = 0;
+      controls.maxZoom = Infinity;
+      camera.position.set(center.x + viewDistance * 0.8, center.y + viewDistance * 0.7, center.z + viewDistance);
+      controls.target.copy(center);
+    }
+    controls.update();
+  };
+
+  const fitPlanCamera = () => {
+    const aspect = Math.max(container.clientWidth, 1) / Math.max(container.clientHeight, 1);
+    const halfH = (Math.max(size.x, size.z) / 2) * 1.12;
+    planCamera.left = -halfH * aspect;
+    planCamera.right = halfH * aspect;
+    planCamera.top = halfH;
+    planCamera.bottom = -halfH;
+    planCamera.updateProjectionMatrix();
+  };
+
   const resize = () => {
     const width = Math.max(container.clientWidth, 1);
     const height = Math.max(container.clientHeight, 1);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    fitPlanCamera();
     renderer.setSize(width, height, false);
   };
   const resizeObserver = new ResizeObserver(resize);
@@ -71,7 +131,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
     previousTime = time;
     controls.update();
     for (const callback of frameCallbacks) callback(time / 1000, deltaTime);
-    renderer.render(scene, camera);
+    renderer.render(scene, activeCamera());
     animationFrame = window.requestAnimationFrame(animate);
   };
   animationFrame = window.requestAnimationFrame(animate);
@@ -83,7 +143,6 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
       if (!(object instanceof THREE.Mesh)) return;
       const override = byName.get(object.name);
       if (!override) return;
-
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) {
         if ('color' in material && override.color) {
@@ -115,15 +174,43 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
-  const pickFloor = (clientX: number, clientY: number) => {
+  const setPointer = (clientX: number, clientY: number) => {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.set(
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1
     );
-    raycaster.setFromCamera(pointer, camera);
+    raycaster.setFromCamera(pointer, activeCamera());
+  };
+
+  /** true if the mesh (or any ancestor) is visible — hidden ceilings must not block 2D picks. */
+  const isVisible = (object: THREE.Object3D) => {
+    let o: THREE.Object3D | null = object;
+    while (o) { if (o.visible === false) return false; o = o.parent; }
+    return true;
+  };
+
+  /** Legacy: intersect an infinite horizontal plane at floor level. */
+  const pickFloor = (clientX: number, clientY: number) => {
+    setPointer(clientX, clientY);
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY);
     return raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+  };
+
+  /**
+   * Raycast the actual building model so clicked nodes land on real geometry.
+   * In 2D plan mode, prefer Floor_* meshes so nodes land on the walkable floor,
+   * not on desks/counters seen from above.
+   */
+  const pickSurface = (clientX: number, clientY: number, pickOpts?: PickOptions) => {
+    setPointer(clientX, clientY);
+    const hits = raycaster.intersectObjects(model.children, true)
+      .filter((h) => h.face && isVisible(h.object));
+    if (pickOpts?.floorsOnly) {
+      const floorHit = hits.find((h) => /^Floor/i.test(h.object.name));
+      if (floorHit) return floorHit.point.clone();
+    }
+    return hits[0]?.point.clone() ?? null;
   };
 
   return {
@@ -134,7 +221,10 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string)
     renderer,
     applyOverrides,
     setCamera,
+    setViewMode,
+    getViewMode: () => viewMode,
     pickFloor,
+    pickSurface,
     onFrame(callback: FrameCallback) {
       frameCallbacks.add(callback);
       return () => frameCallbacks.delete(callback);

@@ -11,7 +11,7 @@ import { buildRoute } from '@/lib/three/route';
 import { findPath, pickStartNode, type GEdge, type GNode } from '@/lib/wayfinding/graph';
 
 interface Msg { role: 'user' | 'assistant'; content: string; }
-type CamMode = 'orbit' | 'follow' | 'front';
+type CamMode = 'orbit' | 'follow' | 'front' | 'walk';
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -26,6 +26,21 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
   const animRef = useRef({ progress: 0, active: false, speed: 1.7 });
   const startedRef = useRef(false);
   const camModeRef = useRef<CamMode>('orbit');
+
+  /** First-person auto-walk state: fly-in progress + drag look offsets. */
+  const walkRef = useRef({
+    intro: 0,
+    yaw: 0,
+    pitch: 0,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    eyeHeight: 1.6,
+    fromPos: null as any,
+    standPos: null as any,
+    baseYaw: 0,
+  });
+
   const [sceneReady, setSceneReady] = useState(false);
   const [camMode, setCamMode] = useState<CamMode>('orbit');
   const [messages, setMessages] = useState<Msg[]>([
@@ -41,12 +56,14 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
   useEffect(() => {
     let cancelled = false;
     let offFrame: any = null;
+    const cleanups: Array<() => void> = [];
     (async () => {
       try {
         const fs = await createFloorScene(containerRef.current!, MODEL_URL);
         if (cancelled) { fs.dispose(); return; }
         fsRef.current = fs;
         setSceneReady(true);
+
         offFrame = fs.onFrame((t: number, dt: number) => {
           routeRef.current?.update(dt);
           const m = markerRef.current;
@@ -55,12 +72,67 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
             m.position.y = m.userData.baseY + 0.04 * Math.sin(t * 2.2);
           }
           const a = animRef.current;
+          const w = walkRef.current;
+          const mode = camModeRef.current;
+
+          // ── FIRST-PERSON AUTO-WALK ──
+                    // ── FIRST-PERSON: stand inside (reception) + auto-walk ──
+          if (mode === 'walk') {
+            fs.controls.enabled = false; // no orbit / up-down in walk mode
+            if (routeRef.current && a.active) {
+              a.progress = Math.min(1, a.progress + (dt * a.speed) / Math.max(routeRef.current.length, 1));
+            }
+            // position: follow the route, or stand at the reception start point
+            let p = null;
+            if (routeRef.current) {
+              p = routeRef.current.curve.getPointAt(a.progress);
+            } else if (w.standPos) {
+              p = w.standPos;
+            } else {
+              return;
+            }
+            const ahead = routeRef.current
+              ? routeRef.current.curve.getPointAt(Math.min(1, a.progress + 0.02))
+              : null;
+            if (m && routeRef.current) { m.position.set(p.x, p.y, p.z); m.userData.baseY = p.y; }
+
+            // zoom from the previous camera position down to eye level
+            w.intro = Math.min(1, w.intro + dt * 0.9);
+            const k = 1 - Math.pow(1 - w.intro, 3); // easeOutCubic
+            const eye = new fs.THREE.Vector3(p.x, p.y + w.eyeHeight, p.z);
+            const startPos = w.fromPos ?? eye;
+            const camPos = new fs.THREE.Vector3().lerpVectors(startPos, eye, k);
+
+            // heading follows the path tangent, or the reception facing direction, plus drag look
+            const baseYaw = ahead
+              ? Math.atan2(ahead.x - p.x, ahead.z - p.z)
+              : w.baseYaw;
+            const yaw = baseYaw + w.yaw;
+            const pitch = Math.max(-0.35, Math.min(0.35, w.pitch)); // clamp: no big up/down
+            const look = new fs.THREE.Vector3(
+              camPos.x + Math.sin(yaw) * Math.cos(pitch),
+              camPos.y + Math.sin(pitch),
+              camPos.z + Math.cos(yaw) * Math.cos(pitch)
+            );
+            fs.camera.position.copy(camPos);
+            fs.camera.lookAt(look);
+
+            if (routeRef.current && a.progress >= 1 && a.active) {
+              a.active = false;
+              setStatus('done');
+              pushMsg('assistant', `You have arrived at ${routeLabelRef.current}.`);
+            }
+            return;
+          }
+
+          // ── ORBIT MODES ──
+          fs.controls.enabled = true;
           if (a.active && routeRef.current && m) {
             a.progress = Math.min(1, a.progress + (dt * a.speed) / Math.max(routeRef.current.length, 1));
             const p = routeRef.current.curve.getPointAt(a.progress);
             m.position.set(p.x, p.y, p.z);
             m.userData.baseY = p.y;
-            if (camModeRef.current === 'follow') {
+            if (mode === 'follow') {
               const ahead = routeRef.current.curve.getPointAt(Math.min(1, a.progress + 0.05));
               fs.camera.position.lerp(new fs.THREE.Vector3(p.x, p.y + 1.6, p.z), 0.12);
               fs.controls.target.set(ahead.x, ahead.y + 1.35, ahead.z);
@@ -73,6 +145,29 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
             }
           }
         });
+
+        // drag-to-look while auto-walking
+        const el = fs.renderer.domElement;
+        const w = walkRef.current;
+        const onDown = (e: PointerEvent) => {
+          w.dragging = true; w.lastX = e.clientX; w.lastY = e.clientY;
+        };
+        const onUp = () => { w.dragging = false; };
+        const onMove = (e: PointerEvent) => {
+          if (!w.dragging || camModeRef.current !== 'walk') return;
+          w.yaw -= (e.clientX - w.lastX) * 0.004;
+          w.pitch -= (e.clientY - w.lastY) * 0.003;
+          w.pitch = Math.max(-0.35, Math.min(0.35, w.pitch));
+          w.lastX = e.clientX; w.lastY = e.clientY;
+        };
+        el.addEventListener('pointerdown', onDown);
+        window.addEventListener('pointerup', onUp);
+        el.addEventListener('pointermove', onMove);
+        cleanups.push(() => {
+          el.removeEventListener('pointerdown', onDown);
+          window.removeEventListener('pointerup', onUp);
+          el.removeEventListener('pointermove', onMove);
+        });
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Unknown model loading error';
         setLoadError(`Could not load the 3D model at ${MODEL_URL}: ${reason}`);
@@ -81,6 +176,7 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     return () => {
       cancelled = true;
       offFrame?.();
+      cleanups.forEach((fn) => fn());
       fsRef.current?.dispose();
       fsRef.current = null;
     };
@@ -89,6 +185,28 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
   useEffect(() => {
     if (sceneReady) fsRef.current?.applyOverrides(mapData?.overrides ?? []);
   }, [mapData, sceneReady]);
+    /* Start the visitor INSIDE the reception with a 360° stand view — not outside the building. */
+  useEffect(() => {
+    const fs = fsRef.current;
+    if (!sceneReady || !fs || !mapData?.nodes?.length) return;
+    if (walkRef.current.standPos) return;
+    const ns: GNode[] = mapData.nodes.map((n: any) => ({ id: n._id, label: n.label, position: n.position }));
+    const startId = pickStartNode(ns);
+    const start = ns.find((n) => n.id === startId);
+    if (!start) return;
+    // face along the first connection so the visitor looks into the building
+    const conn = (mapData.connections ?? []).find((c: any) => c.fromNodeId === startId || c.toNodeId === startId);
+    const otherId = conn ? (conn.fromNodeId === startId ? conn.toNodeId : conn.fromNodeId) : null;
+    const other = otherId ? ns.find((n) => n.id === otherId) : null;
+    const w = walkRef.current;
+    w.standPos = new fs.THREE.Vector3(start.position.x, start.position.y, start.position.z);
+    w.baseYaw = other ? Math.atan2(other.position.x - start.position.x, other.position.z - start.position.z) : 0;
+    w.fromPos = new fs.THREE.Vector3(start.position.x, start.position.y + 10, start.position.z + 6); // gentle drop-in
+    w.intro = 0;
+    setCamMode('walk');
+    camModeRef.current = 'walk';
+    pushMsg('assistant', `You're at the ${start.label}. Drag to look around in 360°, or tell me where you want to go.`);
+  }, [sceneReady, mapData]);
 
   function pushMsg(role: Msg['role'], content: string) {
     setMessages((m) => [...m.slice(-12), { role, content }]);
@@ -127,6 +245,8 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
       return;
     }
     const pts = path.map((id) => ns.find((n) => n.id === id)!.position);
+        walkRef.current.standPos = new fs.THREE.Vector3(pts[0].x, pts[0].y, pts[0].z);
+    if (pts.length > 1) walkRef.current.baseYaw = Math.atan2(pts[1].x - pts[0].x, pts[1].z - pts[0].z);
     const route = buildRoute(fs.THREE, pts);
     fs.scene.add(route.group);
     routeRef.current = route;
@@ -165,8 +285,15 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     setStatus('routing');
     setRouteLabel(dest.name);
     routeLabelRef.current = dest.name;
-    if (camModeRef.current === 'front') fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
-    pushMsg('assistant', `Follow the green line — heading to ${dest.name}.`);
+
+    // ── start the first-person auto-walk right here ──
+    walkRef.current.intro = 0;
+    walkRef.current.yaw = 0;
+    walkRef.current.pitch = 0;
+    walkRef.current.fromPos = fs.camera.position.clone();
+    setCamMode('walk');
+
+    pushMsg('assistant', `Follow the green line — auto-walking to ${dest.name}. Drag to look around.`);
   }
 
   function onSend(text?: string) {
@@ -193,8 +320,17 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     setCamMode(mode);
     const fs = fsRef.current;
     if (!fs) return;
-    if (mode === 'front') fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
-    else if (mode === 'orbit') fs.setCamera('default', markerRef.current ? markerRef.current.position : undefined);
+    if (mode === 'walk') {
+      walkRef.current.fromPos = fs.camera.position.clone();
+      walkRef.current.intro = 0;
+      walkRef.current.yaw = 0;
+      walkRef.current.pitch = 0;
+    if (!walkRef.current.standPos) fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
+    } else if (mode === 'front') {
+      fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
+    } else if (mode === 'orbit') {
+      fs.setCamera('default', markerRef.current ? markerRef.current.position : undefined);
+    }
   }
 
   const suggestions = (mapData?.destinations ?? []).slice(0, 6);
@@ -221,7 +357,7 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
         </div>
         {status === 'routing' && (
           <span className="ml-3 text-xs font-semibold px-3 py-1.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/40">
-            Walking to {routeLabel}…
+            Auto-walking to {routeLabel}…
           </span>
         )}
         {status === 'done' && (
@@ -237,71 +373,75 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
           ['orbit', Orbit, 'Default view'],
           ['follow', Footprints, 'Walk view'],
           ['front', PersonStanding, 'Entrance view'],
-        ] as const).map(([mode, Icon, label]) => (
+          ['walk', RotateCcw, 'Auto-walk (first-person)'],
+        ] as const).map(([mode, Icon, labelText]) => (
           <button
             key={mode}
-            onClick={() => setView(mode as CamMode)}
-            title={label}
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
+            onClick={() => setView(mode)}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold shadow-lg transition-colors ${
               camMode === mode
-                ? 'bg-blue-600 border-blue-500 text-white'
-                : 'bg-slate-900/80 border-slate-700 text-slate-300 hover:bg-slate-800'
+                ? 'bg-blue-600 text-white'
+                : 'bg-[#111c33]/90 text-slate-200 border border-white/10 hover:bg-[#1a2a4a]'
             }`}
           >
-            <Icon className="size-4" /> {label}
+            <Icon className="size-4" />
+            {labelText}
           </button>
         ))}
-        {status !== 'idle' && (
-          <button
-            onClick={() => { animRef.current = { ...animRef.current, progress: 0, active: true }; setStatus('routing'); }}
-            className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border bg-slate-900/80 border-slate-700 text-slate-300 hover:bg-slate-800"
-          >
-            <RotateCcw className="size-4" /> Replay
-          </button>
-        )}
       </div>
 
-      {/* AI direction chat */}
-      <div className="absolute bottom-5 left-5 w-80 max-w-[calc(100vw-2.5rem)] bg-slate-900/90 backdrop-blur border border-slate-700 rounded-2xl z-10 overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-slate-700/60 text-xs font-bold tracking-wide text-slate-300">
-          NAVI ASSISTANT — ASK FOR DIRECTIONS
-        </div>
-        <div className="max-h-44 overflow-y-auto px-3 py-2 space-y-2">
-          {messages.map((m, i) => (
-            <div key={i} className={`text-[13px] leading-snug rounded-lg px-3 py-2 ${
-              m.role === 'user' ? 'bg-blue-600/30 text-blue-100 ml-6' : 'bg-slate-800 text-slate-200 mr-6'
-            }`}>
-              {m.content}
-            </div>
-          ))}
-        </div>
-        {suggestions.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-3 pb-2">
-            {suggestions.map((d: any) => (
-              <button
-                key={d._id}
-                onClick={() => onSend(d.name)}
-                className="text-[11px] px-2 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
+      {/* assistant chat */}
+      <div className="absolute bottom-5 left-5 w-[min(24rem,calc(100vw-2.5rem))] z-10">
+        <div className="rounded-2xl bg-[#0f1a30]/95 border border-white/10 shadow-2xl backdrop-blur">
+          <div className="px-4 py-2.5 border-b border-white/10 text-xs font-bold tracking-wide text-slate-300">
+            NAVI ASSISTANT — ASK FOR DIRECTIONS
+          </div>
+          <div className="px-4 py-3 space-y-2 max-h-44 overflow-y-auto">
+            {messages.map((msg, i) => (
+              <div
+                key={i}
+                className={`text-sm leading-snug rounded-xl px-3 py-2 ${
+                  msg.role === 'user'
+                    ? 'bg-blue-600/80 text-white ml-6'
+                    : 'bg-white/5 text-slate-200 mr-6'
+                }`}
               >
-                {d.name}
-              </button>
+                {msg.content}
+              </div>
             ))}
           </div>
-        )}
-        <form
-          onSubmit={(e) => { e.preventDefault(); onSend(); }}
-          className="flex items-center gap-2 px-3 py-2.5 border-t border-slate-700/60"
-        >
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder='e.g. "Take me to the Toilets"'
-            className="flex-1 bg-slate-800 rounded-lg px-3 py-2 text-sm outline-none placeholder:text-slate-500 focus:ring-1 ring-blue-500"
-          />
-          <button type="submit" className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500">
-            <Send className="size-4" />
-          </button>
-        </form>
+          {suggestions.length > 0 && messages.length <= 2 && (
+            <div className="px-4 pb-2 flex flex-wrap gap-1.5">
+              {suggestions.map((s: any) => (
+                <button
+                  key={s._id}
+                  onClick={() => onSend(s.name)}
+                  className="text-xs px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10"
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <form
+            onSubmit={(e) => { e.preventDefault(); onSend(); }}
+            className="flex items-center gap-2 p-3 border-t border-white/10"
+          >
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder='e.g. "Take me to the Toilets"'
+              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500 placeholder:text-slate-500"
+            />
+            <button
+              type="submit"
+              className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 transition-colors"
+              aria-label="Send"
+            >
+              <Send className="size-4" />
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

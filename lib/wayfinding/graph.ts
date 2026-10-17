@@ -50,7 +50,9 @@ export function nearestNode(nodes: GNode[], p: Pos): string | null {
 
 export function pickStartNode(nodes: GNode[]): string | null {
   if (!nodes.length) return null;
-  const entrance = nodes.find((n) => /entrance|main entry/i.test(n.label));
-  if (entrance) return entrance.id;
+  const preferred =
+    nodes.find((n) => /reception|front\s*desk/i.test(n.label)) ??
+    nodes.find((n) => /entrance|main\s*entry|lobby/i.test(n.label));
+  if (preferred) return preferred.id;
   return nearestNode(nodes, { x: 0, y: 0, z: 0 });
 }
