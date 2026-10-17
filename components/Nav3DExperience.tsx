@@ -5,13 +5,13 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { ArrowLeft, Footprints, Orbit, PersonStanding, RotateCcw, Send } from 'lucide-react';
+import { ArrowLeft, Compass, Footprints, Orbit, PersonStanding, RotateCcw, Send } from 'lucide-react';
 import { createFloorScene, MODEL_URL } from '@/lib/three/floorScene';
 import { buildRoute } from '@/lib/three/route';
 import { findPath, pickStartNode, type GEdge, type GNode } from '@/lib/wayfinding/graph';
 
 interface Msg { role: 'user' | 'assistant'; content: string; }
-type CamMode = 'orbit' | 'follow' | 'front' | 'walk';
+type CamMode = 'orbit' | 'follow' | 'front' | 'walk' | 'explore';
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -74,6 +74,21 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
           const a = animRef.current;
           const w = walkRef.current;
           const mode = camModeRef.current;
+
+          // ── FREE EXPLORE: the scene runs the first-person camera (WASD + drag look + collisions) ──
+          if (mode === 'explore') {
+            if (routeRef.current && a.active) {
+              a.progress = Math.min(1, a.progress + (dt * a.speed) / Math.max(routeRef.current.length, 1));
+              const rp = routeRef.current.curve.getPointAt(a.progress);
+              if (m) { m.position.set(rp.x, rp.y, rp.z); m.userData.baseY = rp.y; }
+              if (a.progress >= 1) {
+                a.active = false;
+                setStatus('done');
+                pushMsg('assistant', `You have arrived at ${routeLabelRef.current}.`);
+              }
+            }
+            return;
+          }
 
           // ── FIRST-PERSON AUTO-WALK ──
                     // ── FIRST-PERSON: stand inside (reception) + auto-walk ──
@@ -188,7 +203,16 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     /* Start the visitor INSIDE the reception with a 360° stand view — not outside the building. */
   useEffect(() => {
     const fs = fsRef.current;
-    if (!sceneReady || !fs || !mapData?.nodes?.length) return;
+    if (!sceneReady || !fs || !mapData) return;
+    if (!mapData.nodes?.length && !walkRef.current.standPos) {
+      // nothing mapped yet: still start INSIDE at the main entrance, free to walk around
+      walkRef.current.standPos = fs.entranceStart.clone();
+      camModeRef.current = 'explore';
+      queueMicrotask(() => setCamMode('explore'));
+      pushMsg('assistant', "You're at the main entrance. Drag to look and use W A S D to walk around inside.");
+      return;
+    }
+    if (!mapData.nodes?.length) return;
     if (walkRef.current.standPos) return;
     const ns: GNode[] = mapData.nodes.map((n: any) => ({ id: n._id, label: n.label, position: n.position }));
     const startId = pickStartNode(ns);
@@ -203,10 +227,28 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     w.baseYaw = other ? Math.atan2(other.position.x - start.position.x, other.position.z - start.position.z) : 0;
     w.fromPos = new fs.THREE.Vector3(start.position.x, start.position.y + 10, start.position.z + 6); // gentle drop-in
     w.intro = 0;
-    setCamMode('walk');
     camModeRef.current = 'walk';
+    queueMicrotask(() => setCamMode('walk'));
     pushMsg('assistant', `You're at the ${start.label}. Drag to look around in 360°, or tell me where you want to go.`);
   }, [sceneReady, mapData]);
+
+  /* Keep the scene in step with the chosen camera: inside modes only render what is in line of sight. */
+  useEffect(() => {
+    const fs = fsRef.current;
+    if (!sceneReady || !fs) return;
+    if (camMode === 'explore') {
+      const sp = walkRef.current.standPos;
+      const yaw = sp ? walkRef.current.baseYaw + Math.PI : 0;   // Nav3D yaw (atan2 dx,dz) → scene yaw (faces −Z at 0)
+      fs.goInside(sp ?? fs.entranceStart, sp ? yaw : 0);
+      return;
+    }
+    if (fs.getViewMode() === 'inside') {
+      fs.setViewMode('3d');
+      if (camMode === 'front') fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
+      else if (camMode === 'orbit') fs.setCamera('default', markerRef.current ? markerRef.current.position : undefined);
+    }
+    fs.setCulling(camMode === 'walk' || camMode === 'follow');
+  }, [camMode, sceneReady]);
 
   function pushMsg(role: Msg['role'], content: string) {
     setMessages((m) => [...m.slice(-12), { role, content }]);
@@ -326,6 +368,8 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
       walkRef.current.yaw = 0;
       walkRef.current.pitch = 0;
     if (!walkRef.current.standPos) fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
+    } else if (mode === 'explore') {
+      /* handled by the camMode effect (goInside at the main entrance) */
     } else if (mode === 'front') {
       fs.setCamera('front', new fs.THREE.Vector3(0, 1.2, 0));
     } else if (mode === 'orbit') {
@@ -367,12 +411,24 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
         )}
       </header>
 
+      {camMode === 'explore' && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 rounded-full bg-black/55 border border-white/10 px-4 py-1.5 text-xs text-slate-200">
+          Drag to look · W A S D walk · Shift run · Q/E turn · scroll to zoom
+        </div>
+      )}
+      {camMode === 'orbit' && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 rounded-full bg-black/55 border border-white/10 px-4 py-1.5 text-xs text-slate-200">
+          Left-drag rotate · right-drag pan · scroll zoom · W A S D fly
+        </div>
+      )}
+
       {/* view controls */}
       <div className="absolute bottom-5 right-5 flex flex-col gap-2 z-10">
         {([
           ['orbit', Orbit, 'Default view'],
           ['follow', Footprints, 'Walk view'],
           ['front', PersonStanding, 'Entrance view'],
+          ['explore', Compass, 'Explore inside (free move)'],
           ['walk', RotateCcw, 'Auto-walk (first-person)'],
         ] as const).map(([mode, Icon, labelText]) => (
           <button
