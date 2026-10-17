@@ -3,17 +3,6 @@ import { query } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 
-async function resolveVideoUrl(ctx: QueryCtx, storageId?: string) {
-  if (!storageId) return "";
-  try {
-    const publicUrl = await ctx.storage.getUrl(storageId as Id<"_storage">);
-    return publicUrl || "";
-  } catch (storageErr) {
-    console.warn(`[Storage Warning]: Could not resolve ${storageId}`);
-    return "";
-  }
-}
-
 function normalizeNodeLabel(label?: string) {
   return (label || "")
     .toLowerCase()
@@ -62,7 +51,6 @@ export const getBuildingContext = query({
         label: n.label,
         floorId: n.floorId,
         isLandmark: n.isLandmark,
-        videoClipUrl: n.videoClipUrl,
         landmarkType: n.landmarkType,
       })),
       qrCodes: qrCodes.map((code) => ({
@@ -141,7 +129,6 @@ export const getWayfindingSequence = query({
     const isAlreadyAtDestination = startNode._id === matchedDestination.targetNodeId;
     if (isAlreadyAtDestination) {
       console.log("[Wayfinding]: Already at destination. Showing main entrance node slide.");
-      const resolvedStartUrl = await resolveVideoUrl(ctx, startNode.videoClipUrl);
 
       return {
         destination: matchedDestination.name,
@@ -153,7 +140,6 @@ export const getWayfindingSequence = query({
           textDirection: "",
           description: `You are already at ${startNode.label}.`,
           walkingTime: 0,
-          video: resolvedStartUrl,
           isLandmark: startNode.isLandmark,
           landmarkType: startNode.landmarkType,
         }],
@@ -170,8 +156,6 @@ export const getWayfindingSequence = query({
       console.error(
         `[Graph Error]: No path to "${matchedDestination.name}"`
       );
-      const resolvedFallbackUrl = await resolveVideoUrl(ctx, startNode.videoClipUrl);
-
       return {
         destination: matchedDestination.name,
         slides: [{
@@ -182,7 +166,6 @@ export const getWayfindingSequence = query({
           textDirection: "",
           description: `Starting from ${startNode.label}.`,
           walkingTime: 0,
-          video: resolvedFallbackUrl,
           isLandmark: startNode.isLandmark,
           landmarkType: startNode.landmarkType,
         }],
@@ -210,9 +193,6 @@ export const getWayfindingSequence = query({
       const edgeForThisStep = i > 0 ? pathEdges[i - 1] : null;
       const isDuplicateSelfStep = previousNode?._id === node._id;
 
-      const sourceVideoId = node.videoClipUrl || "";
-      const resolvedVideoUrl = await resolveVideoUrl(ctx, sourceVideoId);
-
       slides.push({
         id: `${node._id}-${i}`,
         stepTitle:
@@ -228,7 +208,6 @@ export const getWayfindingSequence = query({
         textDirection: isDuplicateSelfStep ? "" : edgeForThisStep?.textDirection || "",
         description: isDuplicateSelfStep ? `You are already at ${node.label}.` : edgeForThisStep?.audioDescription || "",
         walkingTime: isDuplicateSelfStep ? 0 : edgeForThisStep?.estimatedWalkingTime || 0,
-        video: resolvedVideoUrl,
         isLandmark: node.isLandmark,
         landmarkType: node.landmarkType,
       });
@@ -295,7 +274,6 @@ interface WayfindingSlide {
   textDirection: string;
   description: string;
   walkingTime: number;
-  video: string;
   isLandmark: boolean;
   landmarkType?: string;
 }

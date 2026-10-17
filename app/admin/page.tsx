@@ -2,15 +2,16 @@
 
 import React, { startTransition, useState, useRef, useEffect, useCallback } from 'react';
 import { useQuery, useMutation } from 'convex/react';
+import Link from 'next/link';
 import { api } from '@/convex/_generated/api';
 import type { Doc, Id } from '@/convex/_generated/dataModel';
 import AdminAuthGate from '@/components/AdminAuthGate';
 import { ADMIN_AUTH_CHANGED_EVENT } from '@/components/authEvents';
 import ManageSettings from '@/components/ManageSettings';
 import {
-  Layers, MapPin, Compass, Navigation, Plus, Info, Upload, FileImage,
+  Layers, Boxes,MapPin, Compass, Navigation, Plus, Info, Upload, FileImage,
   Loader2, Link2, ChevronLeft, ChevronRight, Trash2, GripVertical,
-  X, Check, Move, Bot, Users, LogOut
+  X, Move, Bot, Users, LogOut
 } from 'lucide-react';
 
 type LandmarkType = 'corridor' | 'staircase' | 'elevator' | 'double-door';
@@ -107,10 +108,8 @@ function AdminDashboard() {
 
   // Files
   const [floorFile, setFloorFile] = useState<File | null>(null);
-  const [nodeFile, setNodeFile] = useState<File | null>(null);
   const [connFile, setConnFile] = useState<File | null>(null);
   const floorFileRef = useRef<HTMLInputElement>(null);
-  const nodeFileRef = useRef<HTMLInputElement>(null);
   const connFileRef = useRef<HTMLInputElement>(null);
 
   const [loading, setLoading] = useState(false);
@@ -214,9 +213,7 @@ function AdminDashboard() {
 
   const resetNodeForm = () => {
     setNodeForm({ floorId: '', label: '', isLandmark: false, landmarkType: 'corridor' });
-    setNodeFile(null);
     setEditingNodeId(null);
-    if (nodeFileRef.current) nodeFileRef.current.value = '';
   };
 
   const resetDestinationForm = () => {
@@ -257,23 +254,14 @@ function AdminDashboard() {
   const handleNode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nodeForm.floorId) return alert('Select a floor');
-    if (!editingNodeId && !nodeFile) return alert('A video clip is required for every node');
     setLoading(true);
     try {
-      const currentVideoClipUrl = editingNodeId ? data?.nodes?.find(n => n._id === editingNodeId)?.videoClipUrl : '';
-      const nextVideoClipUrl = editingNodeId
-        ? (nodeFile ? await uploadToConvex(nodeFile as File) : currentVideoClipUrl || '')
-        : nodeFile ? await uploadToConvex(nodeFile as File) : '';
-
-      if (!nextVideoClipUrl) throw new Error('A node video clip is required');
-
       if (editingNodeId) {
         await updateNode({ token: sessionToken,
           _id: editingNodeId as Id<"nodes">,
           floorId: nodeForm.floorId as Id<"floors">,
           label: nodeForm.label,
           isLandmark: nodeForm.isLandmark,
-          videoClipUrl: nextVideoClipUrl,
           landmarkType: nodeForm.isLandmark ? nodeForm.landmarkType : undefined,
         });
       } else {
@@ -281,7 +269,6 @@ function AdminDashboard() {
           floorId: nodeForm.floorId as Id<"floors">,
           label: nodeForm.label,
           isLandmark: nodeForm.isLandmark,
-          videoClipUrl: nextVideoClipUrl,
           landmarkType: nodeForm.isLandmark ? nodeForm.landmarkType : undefined,
         });
       }
@@ -454,7 +441,6 @@ function AdminDashboard() {
       isLandmark: node.isLandmark,
       landmarkType: node.landmarkType || 'corridor',
     });
-    setNodeFile(null);
   };
 
   const startEditDestination = (destination: Doc<'destinations'>) => {
@@ -505,7 +491,17 @@ function AdminDashboard() {
       {/* ─── Sidebar ─── */}
       <aside className={`flex flex-col border-r border-neutral-800 bg-neutral-900 transition-all duration-300 ${sidebarCollapsed ? 'w-16' : 'w-60'}`}>
         <div className="h-14 flex items-center justify-between px-4 border-b border-neutral-800">
-          {!sidebarCollapsed && <span className="text-sm font-bold tracking-tight text-white">NaviCMS</span>}
+          {!sidebarCollapsed && (
+  <div className="flex items-center gap-2">
+    <span className="text-sm font-bold tracking-tight text-white">NaviCMS</span>
+    <Link
+      href="/admin/map"
+      className="flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 transition-colors"
+    >
+      <Boxes className="size-3" /> 3D Editor
+    </Link>
+  </div>
+)}
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="p-1.5 rounded-md hover:bg-neutral-800 text-neutral-400 transition-colors">
             {sidebarCollapsed ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
           </button>
@@ -763,7 +759,7 @@ function AdminDashboard() {
                     </div>
                     <form onSubmit={handleConn} className="space-y-3">
                       <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-2 text-[10px] text-neutral-400">
-                        Video clips are attached to nodes, not connections. The route visuals will come from the node video for each step.
+                        These directions and audio cues are paired with the route shown on the 3D map.
                       </div>
                       <div>
                         <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Text Direction</label>
@@ -894,26 +890,6 @@ function AdminDashboard() {
                       <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Label</label>
                       <input type="text" value={nodeForm.label} onChange={e => setNodeForm({ ...nodeForm, label: e.target.value })}
                         className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600" required />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-neutral-500 uppercase block mb-1">Node video clip</label>
-                      <div className="relative border border-dashed border-neutral-700 rounded-lg p-3 hover:border-neutral-600 transition-colors cursor-pointer">
-                        <input type="file" accept="video/*" ref={nodeFileRef} onChange={e => setNodeFile(e.target.files?.[0] || null)} className="absolute inset-0 opacity-0 cursor-pointer" />
-                        <div className="flex items-center gap-2 text-[11px] text-neutral-400">
-                          {nodeFile ? <><Check className="size-3.5 text-emerald-500" /> {nodeFile.name}</> : <><Upload className="size-3.5" /> Upload mp4 clip</>}
-                        </div>
-                      </div>
-                      {(nodeFile || (editingNodeId && getStorageAssetUrl(data?.nodes?.find(n => n._id === editingNodeId)?.videoClipUrl))) && (
-                        <div className="mt-3 overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
-                          <video
-                            src={nodeFile ? URL.createObjectURL(nodeFile) : getStorageAssetUrl(data?.nodes?.find(n => n._id === editingNodeId)?.videoClipUrl)}
-                            controls
-                            muted
-                            playsInline
-                            className="h-32 w-full object-cover"
-                          />
-                        </div>
-                      )}
                     </div>
                     <div className="flex items-center gap-2 py-1">
                       <input type="checkbox" id="lm" checked={nodeForm.isLandmark} onChange={e => setNodeForm({ ...nodeForm, isLandmark: e.target.checked })}

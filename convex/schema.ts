@@ -6,6 +6,7 @@ export default defineSchema({
     level: v.number(),
     name: v.string(),
     floorPlanUrl: v.optional(v.string()),
+    modelUrl: v.optional(v.string()),
   }),
 
   nodes: defineTable({
@@ -21,6 +22,8 @@ export default defineSchema({
         v.literal("double-door")
       )
     ),
+    // 3D position in the GLB scene (metres, Y-up)
+    position: v.optional(v.object({ x: v.number(), y: v.number(), z: v.number() })),
   }),
 
   connections: defineTable({
@@ -29,8 +32,7 @@ export default defineSchema({
     textDirection: v.string(),
     audioDescription: v.string(),
     estimatedWalkingTime: v.number(),
-  })
-    .index("by_fromNode", ["fromNodeId"]),
+  }).index("by_fromNode", ["fromNodeId"]),
 
   destinations: defineTable({
     name: v.string(),
@@ -39,6 +41,15 @@ export default defineSchema({
     targetNodeId: v.id("nodes"),
     description: v.string(),
   }),
+
+  materialOverrides: defineTable({
+    floorId: v.id("floors"),
+    meshKey: v.string(),
+    color: v.optional(v.string()),
+    textureStorageId: v.optional(v.id("_storage")),
+    tiling: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_floor", ["floorId"]),
 
   qrCodes: defineTable({
     entityType: v.union(v.literal("node"), v.literal("destination")),

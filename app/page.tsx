@@ -32,7 +32,6 @@ interface SlideData {
   textDirection: string;
   description: string;
   walkingTime: number;
-  video: string;
   isLandmark: boolean;
   landmarkType?: string;
 }
@@ -905,7 +904,7 @@ RESPOND ONLY IN THIS JSON FORMAT:
         isThinking={isThinking}
         isStreaming={isStreaming}
         speakingAmplitude={speakingAmplitude}
-        destination={liveConvexRoute?.destination}
+        destination={spokenDestinationName || liveConvexRoute?.destination}
         assistantLogoUrl={buildingContext?.assistantLogoUrl}
         auraColorA={buildingContext?.assistantConfig?.auraColorA}
         auraColorB={buildingContext?.assistantConfig?.auraColorB}

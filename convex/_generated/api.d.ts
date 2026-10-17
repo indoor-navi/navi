@@ -10,6 +10,7 @@
 
 import type * as admin from "../admin.js";
 import type * as auth from "../auth.js";
+import type * as mapAdmin from "../mapAdmin.js";
 import type * as routes from "../routes.js";
 import type * as seed from "../seed.js";
 
@@ -22,6 +23,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   admin: typeof admin;
   auth: typeof auth;
+  mapAdmin: typeof mapAdmin;
   routes: typeof routes;
   seed: typeof seed;
 }>;

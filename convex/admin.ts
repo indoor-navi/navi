@@ -87,7 +87,6 @@ export const addNode = mutation({
     floorId: v.id("floors"),
     label: v.string(),
     isLandmark: v.boolean(),
-    videoClipUrl: v.optional(v.string()),
     landmarkType: v.optional(
       v.union(
         v.literal("corridor"),
@@ -103,7 +102,6 @@ export const addNode = mutation({
       floorId: args.floorId,
       label: args.label,
       isLandmark: args.isLandmark,
-      videoClipUrl: args.videoClipUrl,
       landmarkType: args.landmarkType,
     });
 
@@ -118,7 +116,6 @@ export const updateNode = mutation({
     floorId: v.id("floors"),
     label: v.string(),
     isLandmark: v.boolean(),
-    videoClipUrl: v.optional(v.string()),
     landmarkType: v.optional(
       v.union(
         v.literal("corridor"),
@@ -134,7 +131,6 @@ export const updateNode = mutation({
       floorId: args.floorId,
       label: args.label,
       isLandmark: args.isLandmark,
-      videoClipUrl: args.videoClipUrl,
       landmarkType: args.landmarkType,
     });
 
