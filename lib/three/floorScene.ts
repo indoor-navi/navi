@@ -1,6 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 export const MODEL_URL = '/floor/ODeL_Building.glb';
 
@@ -12,19 +14,86 @@ type MapOverride = {
 };
 
 type FrameCallback = (time: number, deltaTime: number) => void;
+
 export type ViewMode = '2d' | '3d' | 'inside';
+/** 'admin' = free camera tools + gizmos. 'visitor' = locked inside the building, walk only. */
+export type SceneRole = 'admin' | 'visitor';
+export type CameraPreset = 'iso' | 'top' | 'front' | 'back' | 'left' | 'right';
+export type MoveDir = 'forward' | 'back' | 'left' | 'right' | 'up' | 'down';
+export type GizmoMode = 'translate' | 'rotate';
+export type Cue = 'straight' | 'left' | 'right' | 'uturn' | 'arrive';
+
+export interface MoveSettings {
+  eyeHeight: number;
+  walkSpeed: number;
+  runSpeed: number;
+  turnSpeed: number;
+  fov: number;
+  headBob: boolean;
+  collisions: boolean;
+  guideSpeed: number;
+}
+
+export const DEFAULT_MOVE_SETTINGS: MoveSettings = {
+  eyeHeight: 1.6,
+  walkSpeed: 2.2,
+  runSpeed: 4.5,
+  turnSpeed: 1.8,
+  fov: 70,
+  headBob: true,
+  collisions: true,
+  guideSpeed: 1.7,
+};
+
+export interface GuideState {
+  active: boolean;
+  paused: boolean;
+  /** 0..1 along the route */
+  progress: number;
+  /** metres still to walk */
+  remaining: number;
+  cue: Cue;
+  /** metres until the upcoming turn (null when there is none in sight) */
+  turnIn: number | null;
+}
+
+export interface PoseUpdate {
+  x: number;
+  y: number;
+  z: number;
+  /** 0 = looking toward -Z, positive = turning left */
+  yaw: number;
+  pitch: number;
+  moving: boolean;
+  guide: GuideState | null;
+}
 
 type SceneOptions = {
   /** Hide all Ceiling_* meshes so the floor plan is visible from above (admin roof removal). */
   hideRoof?: boolean;
+  /** Defaults to 'admin'. 'visitor' never exposes orbit / free-fly camera: you can only walk inside. */
+  role?: SceneRole;
+  settings?: Partial<MoveSettings>;
 };
 
 type PickOptions = { floorsOnly?: boolean };
 type ClickCallback = (clientX: number, clientY: number, event: PointerEvent) => void;
 
+const wrapPi = (a: number) => {
+  let r = (a + Math.PI) % (Math.PI * 2);
+  if (r < 0) r += Math.PI * 2;
+  return r - Math.PI;
+};
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+const materialsOf = (m: THREE.Mesh): THREE.Material[] => (Array.isArray(m.material) ? m.material : [m.material]);
+
 export async function createFloorScene(container: HTMLElement, modelUrl: string, opts: SceneOptions = {}) {
+  const role: SceneRole = opts.role ?? 'admin';
+  const visitor = role === 'visitor';
+  const settings: MoveSettings = { ...DEFAULT_MOVE_SETTINGS, ...(opts.settings ?? {}) };
+
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#0b1220');
+  scene.background = new THREE.Color(visitor ? '#141b2b' : '#0b1220');
 
   const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 2000);
   // Top-down orthographic camera used for the 2D plan view (same model, same world coords)
@@ -41,8 +110,6 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  // Free camera: not locked to one centre. Left = orbit, right/middle = pan in ANY direction
-  // (screen-space), wheel = zoom, WASD/arrows/Q/E = fly. No polar or distance clamps.
   controls.maxPolarAngle = Math.PI;
   controls.minDistance = 0.5;
   controls.maxDistance = 600;
@@ -51,6 +118,8 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   controls.panSpeed = 1.2;
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  // Visitors never get the free orbit camera: the building must not move or float around.
+  if (visitor) controls.enabled = false;
 
   scene.add(new THREE.HemisphereLight(0xe5f3ff, 0x263244, 2));
   const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -60,22 +129,31 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   const gltf = await new GLTFLoader().loadAsync(modelUrl);
   const model = gltf.scene;
   scene.add(model);
+  model.updateMatrixWorld(true);
 
-  // ── Roof removal: hide every ceiling mesh so the plan is visible from above ──
+  const candidates: THREE.Mesh[] = [];
+  model.traverse((o) => { if (o instanceof THREE.Mesh) candidates.push(o); });
+
+  /* ───────────── visibility: roof removal (admin) + hidden "outside" meshes ───────────── */
   let roofHidden = Boolean(opts.hideRoof);
-  const applyRoof = () => {
-    model.traverse((o) => {
-      if (o instanceof THREE.Mesh && /^Ceiling/i.test(o.name)) o.visible = !roofHidden;
-    });
+  let hiddenSet = new Set<string>();
+  let hideOn = false;
+  const applyVisibility = () => {
+    for (const m of candidates) {
+      const roof = roofHidden && /^Ceiling/i.test(m.name);
+      const outside = hideOn && hiddenSet.has(m.name);
+      m.visible = !(roof || outside);
+    }
   };
-  applyRoof();
+  applyVisibility();
 
   const bounds = new THREE.Box3().setFromObject(model);
   const center = bounds.getCenter(new THREE.Vector3());
   const size = bounds.getSize(new THREE.Vector3());
   const viewDistance = Math.max(size.x, size.y, size.z, 1) * 1.35;
   const floorY = bounds.min.y + 0.02;
-  camera.position.set(center.x + viewDistance * 0.8, center.y + viewDistance * 0.7, center.z + viewDistance);
+  const defaultOrbitPosition = () => new THREE.Vector3(center.x + viewDistance * 0.8, center.y + viewDistance * 0.7, center.z + viewDistance);
+  camera.position.copy(defaultOrbitPosition());
   camera.near = Math.max(viewDistance / 1000, 0.01);
   camera.far = Math.max(viewDistance * 20, 100);
   camera.updateProjectionMatrix();
@@ -93,51 +171,205 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   // The model runs from the entrance toward -Z, so stepping 0.8 m in is "inside the lobby".
   const entranceStart = new THREE.Vector3(entrance.x, entrance.y, entrance.z - 0.8);
 
-  const fpv = { pos: entranceStart.clone(), yaw: 0, pitch: 0, eye: 1.6, dragging: false, lastX: 0, lastY: 0 };
+  const fpv = {
+    pos: entranceStart.clone(),
+    yaw: 0, pitch: 0,        // what the camera shows (smoothed)
+    yawT: 0, pitchT: 0,      // where the player wants to look
+    lookOff: 0,              // look-around offset while the guide walks
+    lookIdle: 0,
+    dragging: false, lastX: 0, lastY: 0,
+    vel: new THREE.Vector3(),
+    bobT: 0, bobAmp: 0,
+    intro: 1,                // 0 → 1 "stand up and look forward" animation
+    introYaw: 0,
+  };
   const keys = new Set<string>();
+  /** analog input from on-screen controls (joystick / buttons), each -1..1 */
+  const input = { fwd: 0, strafe: 0, turn: 0, run: false };
 
   const wallColliders: THREE.Object3D[] = [];
-  model.traverse((o) => { if (o instanceof THREE.Mesh && /^Wall_/i.test(o.name) && !/Header|Sill/i.test(o.name)) wallColliders.push(o); });
+  const walkables: THREE.Object3D[] = [];
+  for (const m of candidates) {
+    if (/^Wall_/i.test(m.name) && !/Header|Sill/i.test(m.name)) wallColliders.push(m);
+    if (/^(Floor|Corridor_Steps|Steps|Accessible_Ramp)/i.test(m.name) && !/handrail|post|sign/i.test(m.name)) walkables.push(m);
+  }
 
-  const blocked = (from: THREE.Vector3, dir: THREE.Vector3, dist: number) => {
-    const rc = new THREE.Raycaster(from, dir, 0, dist);
-    return rc.intersectObjects(wallColliders, false).length > 0;
+  const wallRay = new THREE.Raycaster();
+  const groundRay = new THREE.Raycaster();
+  const tmpV = new THREE.Vector3();
+  const downDir = new THREE.Vector3(0, -1, 0);
+
+  const blocked = (origin: THREE.Vector3, dir: THREE.Vector3, dist: number) => {
+    // three rays (centre + both shoulders) so you cannot squeeze through a wall corner
+    const perp = new THREE.Vector3(-dir.z, 0, dir.x);
+    for (const off of [0, -0.22, 0.22]) {
+      tmpV.copy(origin).addScaledVector(perp, off);
+      wallRay.set(tmpV, dir);
+      wallRay.near = 0; wallRay.far = dist;
+      if (wallRay.intersectObjects(wallColliders, false).length > 0) return true;
+    }
+    return false;
   };
 
-  const syncFpvCamera = () => {
-    camera.position.set(fpv.pos.x, fpv.pos.y + fpv.eye, fpv.pos.z);
+  /** Height of the walkable surface under (x,z); null when nothing is there (keeps current height). */
+  const groundAt = (x: number, z: number, fromY: number) => {
+    if (!walkables.length) return null;
+    groundRay.set(new THREE.Vector3(x, fromY + 0.7, z), downDir);
+    groundRay.near = 0; groundRay.far = 2.2;
+    const hit = groundRay.intersectObjects(walkables, false)[0];
+    return hit ? hit.point.y : null;
+  };
+
+  /* ───────────── guided auto-walk (follows the green route line) ───────────── */
+  const guide = {
+    curve: null as THREE.Curve<THREE.Vector3> | null,
+    length: 1,
+    t: 0,
+    active: false,
+    paused: false,
+    mult: 1,
+    lastCue: 'straight' as Cue,
+  };
+  const arriveCallbacks = new Set<() => void>();
+  const updateCallbacks = new Set<(p: PoseUpdate) => void>();
+
+  const computeGuideState = (): GuideState | null => {
+    if (!guide.curve) return null;
+    const len = guide.length;
+    const remaining = Math.max(0, (1 - guide.t) * len);
+    let cue: Cue = 'straight';
+    let turnIn: number | null = null;
+    if (remaining < 1.8) cue = 'arrive';
+    else {
+      const heading = (tt: number) => {
+        const tan = guide.curve!.getTangentAt(clamp(tt, 0, 1));
+        return Math.atan2(-tan.x, -tan.z);
+      };
+      const h0 = heading(guide.t);
+      for (let d = 1; d <= 9; d += 0.75) {
+        const tt = guide.t + d / len;
+        if (tt > 1) break;
+        const diff = wrapPi(heading(tt) - h0);
+        if (Math.abs(diff) > 0.6) {
+          cue = Math.abs(diff) > 2.4 ? 'uturn' : diff > 0 ? 'left' : 'right';
+          turnIn = d;
+          break;
+        }
+      }
+    }
+    return { active: guide.active, paused: guide.paused, progress: guide.t, remaining, cue, turnIn };
+  };
+
+  const stepGuide = (dt: number) => {
+    if (!guide.curve) return;
+    guide.t = Math.min(1, guide.t + (dt * settings.guideSpeed * guide.mult) / Math.max(guide.length, 0.01));
+    const p = guide.curve.getPointAt(guide.t);
+    const k = 1 - Math.exp(-7 * dt);
+    fpv.pos.x += (p.x - fpv.pos.x) * k;
+    fpv.pos.z += (p.z - fpv.pos.z) * k;
+    const gy = groundAt(fpv.pos.x, fpv.pos.z, fpv.pos.y);
+    const targetY = gy ?? p.y - 0.12;
+    fpv.pos.y += (targetY - fpv.pos.y) * (1 - Math.exp(-12 * dt));
+    // look a little ahead along the line so corners are turned into smoothly
+    const ahead = guide.curve.getPointAt(Math.min(1, guide.t + 1.6 / Math.max(guide.length, 0.01)));
+    const dx = ahead.x - p.x; const dz = ahead.z - p.z;
+    if (dx * dx + dz * dz > 0.0025) {
+      const want = Math.atan2(-dx, -dz);
+      fpv.yawT = fpv.yaw + wrapPi(want + fpv.lookOff - fpv.yaw);
+    }
+    fpv.pitchT = clamp(fpv.pitchT * Math.exp(-1.5 * dt), -0.6, 0.6);
+    fpv.vel.set(-Math.sin(fpv.yaw) * settings.guideSpeed * guide.mult, 0, -Math.cos(fpv.yaw) * settings.guideSpeed * guide.mult);
+    if (guide.t >= 1) {
+      guide.active = false;
+      fpv.vel.set(0, 0, 0);
+      for (const cb of arriveCallbacks) cb();
+    }
+  };
+
+  const syncFpvCamera = (bobY = 0, bobRoll = 0) => {
+    camera.position.set(fpv.pos.x, fpv.pos.y + eyeNow() + bobY, fpv.pos.z);
     camera.rotation.order = 'YXZ';
-    camera.rotation.set(fpv.pitch, fpv.yaw, 0);
+    camera.rotation.set(fpv.pitch, fpv.yaw, bobRoll);
+  };
+  const eyeNow = () => {
+    const k = 1 - Math.pow(1 - clamp(fpv.intro, 0, 1), 3);
+    return settings.eyeHeight * (0.72 + 0.28 * k);
   };
 
-  /** Where the first-person camera is looking along the floor (yaw 0 = toward -Z). */
   const stepFpv = (dt: number) => {
     if (!dt) return;
-    const fwd = new THREE.Vector3(-Math.sin(fpv.yaw), 0, -Math.cos(fpv.yaw));
-    const right = new THREE.Vector3(Math.cos(fpv.yaw), 0, -Math.sin(fpv.yaw));
-    const move = new THREE.Vector3();
-    if (keys.has('w') || keys.has('arrowup')) move.add(fwd);
-    if (keys.has('s') || keys.has('arrowdown')) move.sub(fwd);
-    if (keys.has('d') || keys.has('arrowright')) move.add(right);
-    if (keys.has('a') || keys.has('arrowleft')) move.sub(right);
-    if (keys.has('q')) fpv.yaw += dt * 1.6;
-    if (keys.has('e')) fpv.yaw -= dt * 1.6;
-    if (move.lengthSq() > 0) {
-      move.normalize().multiplyScalar((keys.has('shift') ? 4.5 : 2.2) * dt);
-      // slide along walls: test each axis separately so you can't walk through them
-      const chest = new THREE.Vector3(fpv.pos.x, fpv.pos.y + 0.9, fpv.pos.z);
-      const pad = 0.35;
-      if (move.x !== 0 && !blocked(chest, new THREE.Vector3(Math.sign(move.x), 0, 0), Math.abs(move.x) + pad)) fpv.pos.x += move.x;
-      chest.set(fpv.pos.x, fpv.pos.y + 0.9, fpv.pos.z);
-      if (move.z !== 0 && !blocked(chest, new THREE.Vector3(0, 0, Math.sign(move.z)), Math.abs(move.z) + pad)) fpv.pos.z += move.z;
+    const S = settings;
+
+    // ── gather input (keyboard + on-screen controls) ──
+    let fwdIn = (keys.has('w') || keys.has('arrowup') ? 1 : 0) - (keys.has('s') || keys.has('arrowdown') ? 1 : 0) + input.fwd;
+    let strIn = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0) + input.strafe;
+    let turnIn = (keys.has('q') || keys.has('arrowleft') ? 1 : 0) - (keys.has('e') || keys.has('arrowright') ? 1 : 0) + input.turn;
+    fwdIn = clamp(fwdIn, -1, 1); strIn = clamp(strIn, -1, 1); turnIn = clamp(turnIn, -1, 1);
+    const running = keys.has('shift') || input.run;
+    const manual = Math.abs(fwdIn) > 0.05 || Math.abs(strIn) > 0.05;
+
+    // taking the controls pauses the guided walk (visitor can resume it)
+    if (guide.active && !guide.paused && manual) guide.paused = true;
+    const steering = guide.active && !guide.paused;
+
+    if (fpv.intro < 1) fpv.intro = Math.min(1, fpv.intro + dt / 1.4);
+
+    // ── turning (smooth) ──
+    if (Math.abs(turnIn) > 0.02) {
+      fpv.lookIdle = 0;
+      if (steering) fpv.lookOff = clamp(fpv.lookOff + turnIn * S.turnSpeed * dt, -1.6, 1.6);
+      else fpv.yawT += turnIn * S.turnSpeed * dt;
+    } else if (steering && !fpv.dragging) {
+      fpv.lookIdle += dt;
+      if (fpv.lookIdle > 1.2) fpv.lookOff *= Math.exp(-1.1 * dt);
     }
-    syncFpvCamera();
+
+    if (steering) {
+      stepGuide(dt);
+    } else {
+      // ── free walking with acceleration / deceleration ──
+      const fwd = new THREE.Vector3(-Math.sin(fpv.yaw), 0, -Math.cos(fpv.yaw));
+      const right = new THREE.Vector3(Math.cos(fpv.yaw), 0, -Math.sin(fpv.yaw));
+      const want = new THREE.Vector3().addScaledVector(fwd, fwdIn).addScaledVector(right, strIn);
+      if (want.lengthSq() > 1) want.normalize();
+      want.multiplyScalar(running ? S.runSpeed : S.walkSpeed);
+      const k = 1 - Math.exp(-(want.lengthSq() > 0 ? 9 : 13) * dt);
+      fpv.vel.x += (want.x - fpv.vel.x) * k;
+      fpv.vel.z += (want.z - fpv.vel.z) * k;
+      const mx = fpv.vel.x * dt; const mz = fpv.vel.z * dt;
+      if (Math.abs(mx) > 1e-5 || Math.abs(mz) > 1e-5) {
+        const chest = new THREE.Vector3(fpv.pos.x, fpv.pos.y + 0.9, fpv.pos.z);
+        const pad = 0.35;
+        if (!S.collisions || Math.abs(mx) < 1e-5 || !blocked(chest, new THREE.Vector3(Math.sign(mx), 0, 0), Math.abs(mx) + pad)) fpv.pos.x += mx;
+        else fpv.vel.x = 0;
+        chest.set(fpv.pos.x, fpv.pos.y + 0.9, fpv.pos.z);
+        if (!S.collisions || Math.abs(mz) < 1e-5 || !blocked(chest, new THREE.Vector3(0, 0, Math.sign(mz)), Math.abs(mz) + pad)) fpv.pos.z += mz;
+        else fpv.vel.z = 0;
+      }
+      const gy = groundAt(fpv.pos.x, fpv.pos.z, fpv.pos.y);
+      if (gy !== null) fpv.pos.y += (gy - fpv.pos.y) * (1 - Math.exp(-14 * dt));
+    }
+
+    // ── smooth look ──
+    fpv.pitchT = clamp(fpv.pitchT, -1.2, 1.2);
+    const lookK = 1 - Math.exp(-(steering ? 4.5 : 16) * dt);
+    fpv.yaw += wrapPi(fpv.yawT - fpv.yaw) * lookK;
+    fpv.pitch += (fpv.pitchT - fpv.pitch) * (1 - Math.exp(-14 * dt));
+
+    // ── head bob while moving ──
+    const speed = Math.hypot(fpv.vel.x, fpv.vel.z);
+    const moving = speed > 0.25;
+    const ampTarget = S.headBob && moving ? clamp(speed / S.runSpeed, 0.25, 1) : 0;
+    fpv.bobAmp += (ampTarget - fpv.bobAmp) * (1 - Math.exp(-8 * dt));
+    fpv.bobT += dt * speed * 2.6;
+    syncFpvCamera(Math.sin(fpv.bobT * 2) * 0.032 * fpv.bobAmp, Math.cos(fpv.bobT) * 0.006 * fpv.bobAmp);
   };
 
-  /** Free-fly for the orbit (3D) and plan (2D) cameras — pan any direction with the keyboard. */
+  /** Free-fly for the orbit (3D) and plan (2D) cameras — pan any direction with the keyboard (admin only). */
+  let flyScale = 1;
   const stepFly = (dt: number) => {
-    if (!dt || !keys.size) return;
-    const speed = (keys.has('shift') ? 18 : 7) * dt;
+    if (visitor || !dt || !keys.size) return;
+    const speed = (keys.has('shift') ? 18 : 7) * dt * flyScale;
     const delta = new THREE.Vector3();
     if (viewMode === '3d') {
       const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y = 0;
@@ -164,11 +396,13 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     controls.target.add(delta);
   };
 
+  const MOVE_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'shift', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
   const onKeyDown = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
     if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    if (['w', 'a', 's', 'd', 'q', 'e', 'shift', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) {
+    if (MOVE_KEYS.includes(k)) {
       keys.add(k);
       if (k.startsWith('arrow')) e.preventDefault();
     }
@@ -179,25 +413,48 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
 
+  /* ───────────── transform gizmo (admin: move / rotate the selected node) ───────────── */
+  let transform: any = null;
+  let gizmoHelper: THREE.Object3D | null = null;
+  let gizmoDragging = false;
+  let gizmoEnd = 0;
+  const gizmoChange = new Set<(o: THREE.Object3D) => void>();
+  const gizmoCommit = new Set<(o: THREE.Object3D) => void>();
+  if (!visitor) {
+    transform = new TransformControls(camera, renderer.domElement);
+    gizmoHelper = transform.getHelper();
+    gizmoHelper!.visible = false;
+    scene.add(gizmoHelper!);
+    transform.setSize(0.9);
+    transform.addEventListener('dragging-changed', (e: any) => {
+      gizmoDragging = Boolean(e.value);
+      if (!gizmoDragging) gizmoEnd = performance.now();
+      controls.enabled = !gizmoDragging && viewMode !== 'inside';
+      if (!gizmoDragging && transform.object) for (const cb of gizmoCommit) cb(transform.object);
+    });
+    transform.addEventListener('objectChange', () => { if (transform.object) for (const cb of gizmoChange) cb(transform.object); });
+  }
+
   const setViewMode = (mode: ViewMode) => {
+    if (visitor && mode !== 'inside') return;
     if (mode === viewMode) return;
     const previous = viewMode;
     viewMode = mode;
     keys.clear();
-    controls.enabled = mode !== 'inside';
+    controls.enabled = !visitor && mode !== 'inside';
     if (mode === 'inside') {
-      // Stand at the main entrance, ceilings visible, ray-cast visibility on.
-      roofHidden = false; applyRoof();
-      fpv.pos.copy(entranceStart); fpv.yaw = 0; fpv.pitch = 0;
-      camera.fov = 70; camera.near = 0.05; camera.updateProjectionMatrix();
+      // Stand at the main entrance, ceilings visible, outside meshes hidden.
+      roofHidden = false; hideOn = true; applyVisibility();
+      fpv.pos.copy(entranceStart); fpv.yaw = 0; fpv.yawT = 0; fpv.pitch = 0; fpv.pitchT = 0; fpv.lookOff = 0;
+      fpv.vel.set(0, 0, 0);
+      camera.fov = settings.fov; camera.near = 0.05; camera.updateProjectionMatrix();
       controls.object = camera;
       syncFpvCamera();
-      setCulling(true);
       return;
     }
     if (previous === 'inside') {
-      setCulling(false);
-      roofHidden = Boolean(opts.hideRoof); applyRoof();
+      hideOn = false;
+      roofHidden = Boolean(opts.hideRoof); applyVisibility();
       camera.fov = 48; camera.near = Math.max(viewDistance / 1000, 0.01); camera.updateProjectionMatrix();
       camera.rotation.order = 'XYZ';
     }
@@ -220,20 +477,22 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
       controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
       controls.minZoom = 0;
       controls.maxZoom = Infinity;
-      camera.position.set(center.x + viewDistance * 0.8, center.y + viewDistance * 0.7, center.z + viewDistance);
+      camera.position.copy(defaultOrbitPosition());
       controls.target.copy(center);
     }
     controls.update();
   };
 
   /** Put the first-person camera at a world point (e.g. a room's node) looking along `yaw`. */
-  const goInside = (point?: { x: number; y: number; z: number }, yaw?: number) => {
+  const goInside = (point?: { x: number; y: number; z: number }, yaw?: number, pitch = 0) => {
     if (viewMode !== 'inside') setViewMode('inside');
     const p = point ?? entranceStart;
     fpv.pos.set(p.x, p.y, p.z);
-    fpv.yaw = yaw ?? 0; fpv.pitch = 0;
+    fpv.yaw = yaw ?? 0; fpv.yawT = fpv.yaw;
+    fpv.pitch = pitch; fpv.pitchT = pitch;
+    fpv.lookOff = 0;
+    fpv.vel.set(0, 0, 0);
     syncFpvCamera();
-    forceCull = true;
   };
 
   const resetView = () => {
@@ -263,70 +522,70 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   resizeObserver.observe(container);
   resize();
 
-  /* ───────────── ray-traced visibility ("only show what you can see") ─────────────
-     From the camera we fire a sphere of rays into the building. Only meshes a ray reaches
-     (looking through glass) stay visible, so you see the room you are in and whatever
-     is genuinely in line of sight through doors — nothing else. */
-  const candidates: THREE.Mesh[] = [];
-  model.traverse((o) => { if (o instanceof THREE.Mesh) candidates.push(o); });
-  const RAY_COUNT = 520;
-  const rayDirs: THREE.Vector3[] = [];
-  for (let i = 0; i < RAY_COUNT; i++) {           // fibonacci sphere = even coverage
-    const y = 1 - (2 * (i + 0.5)) / RAY_COUNT;
-    const r = Math.sqrt(1 - y * y);
-    const phi = i * Math.PI * (3 - Math.sqrt(5));
-    rayDirs.push(new THREE.Vector3(Math.cos(phi) * r, y, Math.sin(phi) * r));
-  }
-  const seeThrough = (m: THREE.Mesh) => {
-    if (/glass|window/i.test(m.name)) return true;
-    const mats = Array.isArray(m.material) ? m.material : [m.material];
-    return mats.some((mt) => mt.transparent && mt.opacity < 0.9);
-  };
-  let cullEnabled = false;
-  let forceCull = false;
-  const lastCullPos = new THREE.Vector3(1e9, 1e9, 1e9);
-  let lastCullTime = 0;
-  const visibleUntil = new Map<THREE.Object3D, number>();
-  const cullRaycaster = new THREE.Raycaster();
-  cullRaycaster.far = 45;
-
-  const runCull = (now: number) => {
-    const origin = camera.position;
-    const prevSides = candidates.map((m) => (Array.isArray(m.material) ? m.material[0].side : m.material.side));
-    // rays must also hit the inner/back faces of ceilings, floors and walls
-    candidates.forEach((m) => (Array.isArray(m.material) ? m.material : [m.material]).forEach((mt) => { mt.side = THREE.DoubleSide; }));
-    for (const dir of rayDirs) {
-      cullRaycaster.set(origin, dir);
-      const hits = cullRaycaster.intersectObjects(candidates, false);
-      for (const h of hits) {
-        visibleUntil.set(h.object, now + 500);        // short grace period prevents flicker
-        if (!seeThrough(h.object as THREE.Mesh)) break;
+  /* ───────────── pre-computed interior visibility ("outside is not shown") ─────────────
+     Instead of casting rays every frame (which made walls and rooms pop in and, when you stood
+     still, hid EVERYTHING → black screen), the building is analysed once: rays are fired from a
+     grid of standing points on every floor, and any mesh that no ray from inside ever reaches is
+     "outside only". That list is saved in the database (admin "Bake") and simply hidden for
+     visitors — there is no per-frame work and nothing appears or disappears while walking. */
+  const computeHiddenMeshes = async (onProgress?: (p: number) => void): Promise<string[]> => {
+    model.updateMatrixWorld(true);
+    const floors = candidates.filter((m) => /^Floor/i.test(m.name) && !/handrail|sign/i.test(m.name));
+    if (!floors.length) return [];
+    const savedSides = new Map<THREE.Material, THREE.Side>();
+    for (const m of candidates) for (const mt of materialsOf(m)) { if (!savedSides.has(mt)) savedSides.set(mt, mt.side); mt.side = THREE.DoubleSide; }
+    const marked = new Set<THREE.Object3D>();
+    try {
+      let spacing = 1.5;
+      let pts: THREE.Vector3[] = [];
+      const down = new THREE.Raycaster();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        pts = [];
+        for (let x = bounds.min.x + spacing / 2; x <= bounds.max.x; x += spacing) {
+          for (let z = bounds.min.z + spacing / 2; z <= bounds.max.z; z += spacing) {
+            down.set(new THREE.Vector3(x, bounds.max.y + 2, z), downDir);
+            const hit = down.intersectObjects(floors, false)[0];
+            if (hit) pts.push(new THREE.Vector3(x, hit.point.y + 1.5, z));
+          }
+        }
+        if (pts.length <= 700) break;
+        spacing *= 1.4;
       }
+      const RAYS = 220;
+      const dirs: THREE.Vector3[] = [];
+      for (let i = 0; i < RAYS; i++) {      // fibonacci sphere = even coverage
+        const y = 1 - (2 * (i + 0.5)) / RAYS;
+        const r = Math.sqrt(1 - y * y);
+        const phi = i * Math.PI * (3 - Math.sqrt(5));
+        dirs.push(new THREE.Vector3(Math.cos(phi) * r, y, Math.sin(phi) * r));
+      }
+      const ray = new THREE.Raycaster();
+      ray.far = 90;
+      let sliceStart = performance.now();
+      for (let pi = 0; pi < pts.length; pi++) {
+        for (const d of dirs) {
+          ray.set(pts[pi], d);
+          const hit = ray.intersectObjects(candidates, false)[0];
+          if (hit) marked.add(hit.object);
+        }
+        if (performance.now() - sliceStart > 14) {
+          onProgress?.(pi / pts.length);
+          await new Promise((r) => setTimeout(r, 0));
+          sliceStart = performance.now();
+        }
+      }
+      onProgress?.(1);
+    } finally {
+      for (const [mt, side] of savedSides) mt.side = side;
     }
-    candidates.forEach((m, i) => (Array.isArray(m.material) ? m.material : [m.material]).forEach((mt) => { mt.side = prevSides[i]; }));
-    for (const m of candidates) m.visible = (visibleUntil.get(m) ?? 0) > now;
+    // Something went wrong (no floors hit, etc.) → hide nothing rather than risk a black screen.
+    if (marked.size < candidates.length * 0.2) return [];
+    return candidates.filter((m) => !marked.has(m)).map((m) => m.name);
   };
 
-  function setCulling(on: boolean) {
-    cullEnabled = on;
-    forceCull = on;
-    visibleUntil.clear();
-    lastCullPos.set(1e9, 1e9, 1e9);
-    if (!on) applyRoof();
-    if (!on) for (const m of candidates) if (!(roofHidden && /^Ceiling/i.test(m.name))) m.visible = true;
-  }
-
-  const updateCull = (now: number) => {
-    if (!cullEnabled) return;
-    if (forceCull || (now - lastCullTime > 120 && camera.position.distanceToSquared(lastCullPos) > 0.09)) {
-      lastCullPos.copy(camera.position);
-      lastCullTime = now;
-      forceCull = false;
-      runCull(now);
-    } else {
-      // expire stale entries without re-casting
-      for (const m of candidates) if (m.visible && (visibleUntil.get(m) ?? 0) <= now) m.visible = false;
-    }
+  const setHiddenMeshes = (names: string[]) => {
+    hiddenSet = new Set(names);
+    applyVisibility();
   };
 
   /** Is `point` in direct line of sight of the camera? (used to hide pins behind walls) */
@@ -347,18 +606,22 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   el.style.touchAction = 'none';
   const onPointerDown = (e: PointerEvent) => {
     down.x = e.clientX; down.y = e.clientY; down.t = performance.now(); down.active = e.button === 0;
-    if (viewMode === 'inside') { fpv.dragging = true; fpv.lastX = e.clientX; fpv.lastY = e.clientY; }
+    if (viewMode === 'inside') { fpv.dragging = true; fpv.lastX = e.clientX; fpv.lastY = e.clientY; fpv.lookIdle = 0; }
   };
   const onPointerMove = (e: PointerEvent) => {
-    if (viewMode !== 'inside' || !fpv.dragging) return;
-    fpv.yaw -= (e.clientX - fpv.lastX) * 0.004;
-    fpv.pitch = Math.max(-1.2, Math.min(1.2, fpv.pitch - (e.clientY - fpv.lastY) * 0.003));
-    fpv.lastX = e.clientX; fpv.lastY = e.clientY;
+    if (viewMode !== 'inside' || !fpv.dragging || gizmoDragging) return;
+    const dx = e.clientX - fpv.lastX; const dy = e.clientY - fpv.lastY;
+    const steering = guide.active && !guide.paused;
+    if (steering) fpv.lookOff = clamp(fpv.lookOff - dx * 0.004, -1.6, 1.6);
+    else fpv.yawT -= dx * 0.004;
+    fpv.pitchT = clamp(fpv.pitchT - dy * 0.003, steering ? -0.6 : -1.2, steering ? 0.6 : 1.2);
+    fpv.lastX = e.clientX; fpv.lastY = e.clientY; fpv.lookIdle = 0;
   };
   const onPointerUp = (e: PointerEvent) => {
     fpv.dragging = false;
     if (!down.active || e.target !== el) return;
     down.active = false;
+    if (gizmoDragging || performance.now() - gizmoEnd < 250) return;
     const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
     if (moved < 6 && performance.now() - down.t < 600) for (const cb of clickCallbacks) cb(e.clientX, e.clientY, e);
   };
@@ -368,20 +631,36 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   const onWheel = (e: WheelEvent) => {
     if (viewMode !== 'inside') return;
     e.preventDefault();
-    camera.fov = Math.max(35, Math.min(95, camera.fov + e.deltaY * 0.02));
+    camera.fov = clamp(camera.fov + e.deltaY * 0.02, 40, 95);
     camera.updateProjectionMatrix();
   };
   el.addEventListener('wheel', onWheel, { passive: false });
 
+  /* ───────────── frame loop ───────────── */
   const frameCallbacks = new Set<FrameCallback>();
   let animationFrame = 0;
   let previousTime = 0;
+  let emitAcc = 0;
   const animate = (time: number) => {
     const deltaTime = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
     previousTime = time;
-    if (viewMode === 'inside') stepFpv(deltaTime);
-    else { stepFly(deltaTime); controls.update(); }
-    updateCull(performance.now());
+    if (viewMode === 'inside') {
+      stepFpv(deltaTime);
+      emitAcc += deltaTime;
+      if (emitAcc > 0.066 && updateCallbacks.size) {
+        emitAcc = 0;
+        const pose: PoseUpdate = {
+          x: fpv.pos.x, y: fpv.pos.y, z: fpv.pos.z, yaw: fpv.yaw, pitch: fpv.pitch,
+          moving: Math.hypot(fpv.vel.x, fpv.vel.z) > 0.25,
+          guide: guide.curve ? computeGuideState() : null,
+        };
+        for (const cb of updateCallbacks) cb(pose);
+      }
+    } else {
+      stepFly(deltaTime);
+      if (!visitor) controls.update();
+    }
+    if (transform && transform.camera !== activeCamera()) transform.camera = activeCamera();
     for (const callback of frameCallbacks) callback(time / 1000, deltaTime);
     renderer.render(scene, activeCamera());
     animationFrame = window.requestAnimationFrame(animate);
@@ -395,8 +674,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
       if (!(object instanceof THREE.Mesh)) return;
       const override = byName.get(object.name);
       if (!override) return;
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of materials) {
+      for (const material of materialsOf(object)) {
         if ('color' in material && override.color) {
           (material as THREE.MeshStandardMaterial).color.set(override.color);
         }
@@ -416,6 +694,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   };
 
   const setCamera = (mode: 'front' | 'default', target?: THREE.Vector3) => {
+    if (visitor) return;
     const focus = target ?? center;
     controls.target.copy(focus);
     const distance = viewDistance * (mode === 'front' ? 0.75 : 1.35);
@@ -459,7 +738,6 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     const hits = raycaster.intersectObjects(model.children, true)
       .filter((h) => h.face && isVisible(h.object));
     if (pickOpts?.floorsOnly) {
-      // walkable floor only: Floor_* meshes, or any visible upward-facing surface (never a wall/desk side)
       const floorHit = hits.find((h) => /^Floor/i.test(h.object.name))
         ?? hits.find((h) => h.face!.normal.clone().transformDirection(h.object.matrixWorld).y > 0.85 && !/Ceiling/i.test(h.object.name));
       if (floorHit) return floorHit.point.clone();
@@ -468,12 +746,101 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     return hits[0]?.point.clone() ?? null;
   };
 
+  /* ───────────── admin camera tools: move / rotate / zoom / presets ───────────── */
+  const moveCamera = (dir: MoveDir, amount = 1) => {
+    if (viewMode === 'inside') {
+      const f = new THREE.Vector3(-Math.sin(fpv.yaw), 0, -Math.cos(fpv.yaw));
+      const r = new THREE.Vector3(Math.cos(fpv.yaw), 0, -Math.sin(fpv.yaw));
+      const d = new THREE.Vector3();
+      if (dir === 'forward') d.copy(f); else if (dir === 'back') d.copy(f).negate();
+      else if (dir === 'right') d.copy(r); else if (dir === 'left') d.copy(r).negate();
+      else if (dir === 'up') d.y = 0.4; else d.y = -0.4;
+      fpv.pos.addScaledVector(d, amount * 0.8 * flyScale);
+      return;
+    }
+    const step = Math.max(viewDistance * 0.04, 0.5) * amount * flyScale;
+    const d = new THREE.Vector3();
+    if (viewMode === '2d') {
+      const s = (Math.max(size.x, size.z) * 0.05 * amount * flyScale) / Math.max(planCamera.zoom, 0.2);
+      if (dir === 'forward' || dir === 'up') d.z -= s; else if (dir === 'back' || dir === 'down') d.z += s;
+      else if (dir === 'left') d.x -= s; else d.x += s;
+    } else {
+      const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y = 0;
+      if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+      fwd.normalize();
+      const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+      if (dir === 'forward') d.copy(fwd); else if (dir === 'back') d.copy(fwd).negate();
+      else if (dir === 'right') d.copy(right); else if (dir === 'left') d.copy(right).negate();
+      else if (dir === 'up') d.y = 1; else d.y = -1;
+      d.multiplyScalar(step);
+    }
+    activeCamera().position.add(d);
+    controls.target.add(d);
+    controls.update();
+  };
+
+  const rotateCamera = (dyaw: number, dpitch = 0) => {
+    if (viewMode === 'inside') {
+      fpv.yawT += dyaw; fpv.pitchT = clamp(fpv.pitchT + dpitch, -1.2, 1.2);
+      return;
+    }
+    if (viewMode === '2d') {
+      planCamera.up.applyAxisAngle(new THREE.Vector3(0, 1, 0), dyaw);
+      planCamera.lookAt(planCamera.position.x, 0, planCamera.position.z);
+      controls.update();
+      return;
+    }
+    const offset = camera.position.clone().sub(controls.target);
+    const sph = new THREE.Spherical().setFromVector3(offset);
+    sph.theta += dyaw;
+    sph.phi = clamp(sph.phi + dpitch, 0.05, Math.PI - 0.05);
+    offset.setFromSpherical(sph);
+    camera.position.copy(controls.target).add(offset);
+    camera.lookAt(controls.target);
+    controls.update();
+  };
+
+  const dollyCamera = (factor: number) => {
+    if (viewMode === 'inside') {
+      camera.fov = clamp(camera.fov * factor, 40, 95);
+      camera.updateProjectionMatrix();
+    } else if (viewMode === '2d') {
+      planCamera.zoom = clamp(planCamera.zoom / factor, 0.2, 20);
+      planCamera.updateProjectionMatrix();
+    } else {
+      const offset = camera.position.clone().sub(controls.target);
+      const len = clamp(offset.length() * factor, controls.minDistance, controls.maxDistance);
+      offset.setLength(len);
+      camera.position.copy(controls.target).add(offset);
+      controls.update();
+    }
+  };
+
+  const setPreset = (preset: CameraPreset) => {
+    if (viewMode !== '3d') setViewMode('3d');
+    const d = viewDistance;
+    const c = center;
+    const pos =
+      preset === 'top' ? new THREE.Vector3(c.x, c.y + d * 1.4, c.z + 0.001) :
+      preset === 'front' ? new THREE.Vector3(c.x, c.y + d * 0.12, c.z + d * 1.2) :
+      preset === 'back' ? new THREE.Vector3(c.x, c.y + d * 0.12, c.z - d * 1.2) :
+      preset === 'left' ? new THREE.Vector3(c.x - d * 1.2, c.y + d * 0.12, c.z) :
+      preset === 'right' ? new THREE.Vector3(c.x + d * 1.2, c.y + d * 0.12, c.z) :
+      defaultOrbitPosition();
+    controls.target.copy(c);
+    camera.position.copy(pos);
+    camera.lookAt(c);
+    controls.update();
+  };
+
+  /* ───────────── API ───────────── */
   return {
     THREE,
     scene,
     camera,
     controls,
     renderer,
+    role,
     applyOverrides,
     setCamera,
     setViewMode,
@@ -483,14 +850,97 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     entranceStart: entranceStart.clone(),
     goInside,
     resetView,
-    setCulling,
     hasLineOfSight,
-    getFpv: () => ({ x: fpv.pos.x, y: fpv.pos.y, z: fpv.pos.z, yaw: fpv.yaw }),
+    getFpv: () => ({ x: fpv.pos.x, y: fpv.pos.y, z: fpv.pos.z, yaw: fpv.yaw, pitch: fpv.pitch }),
+    meshNames: () => candidates.map((m) => m.name),
+
+    /** Apply (true) or lift (false) the "outside meshes hidden" list. */
+    setCulling(on: boolean) { hideOn = on; applyVisibility(); },
+    setHiddenMeshes,
+    computeHiddenMeshes,
+
+    /** movement settings (from the database) */
+    setSettings(next: Partial<MoveSettings>) {
+      Object.assign(settings, next);
+      if (viewMode === 'inside') { camera.fov = settings.fov; camera.updateProjectionMatrix(); }
+    },
+    getSettings: () => ({ ...settings }),
+
+    /** on-screen controls (joystick / pad / buttons) feed these every frame, values -1..1 */
+    setMoveInput(next: Partial<typeof input>) { Object.assign(input, next); },
+    /** instant look rotation in radians (used by touch buttons) */
+    lookBy(dyaw: number, dpitch = 0) {
+      if (guide.active && !guide.paused) fpv.lookOff = clamp(fpv.lookOff + dyaw, -1.6, 1.6);
+      else fpv.yawT += dyaw;
+      fpv.pitchT = clamp(fpv.pitchT + dpitch, -1.2, 1.2);
+      fpv.lookIdle = 0;
+    },
+    /** brief "stand up and look forward" animation played when the visitor arrives */
+    playIntro() { fpv.intro = 0; },
+
+    /** guided auto-walk along a route curve */
+    startGuide(curve: THREE.Curve<THREE.Vector3>, length: number, speedMult = 1) {
+      if (viewMode !== 'inside') setViewMode('inside');
+      guide.curve = curve; guide.length = Math.max(length, 0.01); guide.t = 0;
+      guide.active = true; guide.paused = false; guide.mult = speedMult;
+      fpv.lookOff = 0;
+      const p = curve.getPointAt(0);
+      if (Math.hypot(p.x - fpv.pos.x, p.z - fpv.pos.z) > 4) { fpv.pos.set(p.x, p.y - 0.12, p.z); }
+    },
+    pauseGuide() { if (guide.active) guide.paused = true; },
+    resumeGuide() {
+      if (!guide.curve || guide.t >= 1) return;
+      // re-join the line at the closest point to where the visitor is standing
+      let best = guide.t; let bd = Infinity;
+      for (let i = 0; i <= 200; i++) {
+        const t = i / 200;
+        const p = guide.curve.getPointAt(t);
+        const d = (p.x - fpv.pos.x) ** 2 + (p.z - fpv.pos.z) ** 2;
+        if (d < bd) { bd = d; best = t; }
+      }
+      guide.t = best; guide.active = true; guide.paused = false;
+    },
+    stopGuide() { guide.active = false; guide.paused = false; guide.curve = null; fpv.lookOff = 0; },
+    setGuideSpeed(mult: number) { guide.mult = clamp(mult, 0.4, 3); },
+    onArrive(cb: () => void) { arriveCallbacks.add(cb); return () => { arriveCallbacks.delete(cb); }; },
+    onUpdate(cb: (p: PoseUpdate) => void) { updateCallbacks.add(cb); return () => { updateCallbacks.delete(cb); }; },
+
+    /** admin camera tools */
+    moveCamera,
+    rotateCamera,
+    dollyCamera,
+    setPreset,
+    setFlySpeed(multiplier: number) { flyScale = clamp(multiplier, 0.2, 5); },
+
+    /** admin transform gizmo */
+    attachGizmo(object: THREE.Object3D, mode: GizmoMode) {
+      if (!transform || !gizmoHelper) return;
+      transform.attach(object);
+      transform.setMode(mode);
+      transform.setSpace('world');
+      transform.showX = mode === 'translate'; transform.showZ = mode === 'translate'; transform.showY = true;
+      gizmoHelper.visible = true;
+    },
+    detachGizmo() { if (!transform || !gizmoHelper) return; transform.detach(); gizmoHelper.visible = false; },
+    setGizmoMode(mode: GizmoMode) {
+      if (!transform) return;
+      transform.setMode(mode);
+      transform.showX = mode === 'translate'; transform.showZ = mode === 'translate'; transform.showY = true;
+    },
+    setGizmoSnap(translate: number | null, rotateDeg: number | null) {
+      if (!transform) return;
+      transform.setTranslationSnap(translate);
+      transform.setRotationSnap(rotateDeg === null ? null : (rotateDeg * Math.PI) / 180);
+    },
+    isGizmoDragging: () => gizmoDragging,
+    onGizmoChange(cb: (o: THREE.Object3D) => void) { gizmoChange.add(cb); return () => { gizmoChange.delete(cb); }; },
+    onGizmoCommit(cb: (o: THREE.Object3D) => void) { gizmoCommit.add(cb); return () => { gizmoCommit.delete(cb); }; },
+
     onClick(callback: ClickCallback) {
       clickCallbacks.add(callback);
-      return () => clickCallbacks.delete(callback);
+      return () => { clickCallbacks.delete(callback); };
     },
-    /** Smoothly-less jump of the orbit camera to look at a world point from any direction. */
+    /** Jump of the orbit camera to look at a world point from any direction. */
     flyTo(point: { x: number; y: number; z: number }, distance = 8) {
       if (viewMode === 'inside') { goInside(point); return; }
       const target = new THREE.Vector3(point.x, point.y, point.z);
@@ -508,7 +958,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     pickSurface,
     onFrame(callback: FrameCallback) {
       frameCallbacks.add(callback);
-      return () => frameCallbacks.delete(callback);
+      return () => { frameCallbacks.delete(callback); };
     },
     dispose() {
       window.cancelAnimationFrame(animationFrame);
@@ -520,13 +970,13 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
       window.removeEventListener('pointerup', onPointerUp);
       el.removeEventListener('pointerdown', onPointerDown);
       el.removeEventListener('wheel', onWheel);
+      transform?.dispose();
       controls.dispose();
       model.traverse((object) => {
         if (!(object instanceof THREE.Mesh)) return;
         object.geometry.dispose();
-        const materials = Array.isArray(object.material) ? object.material : [object.material];
-        for (const material of materials) {
-          for (const value of Object.values(material)) {
+        for (const material of materialsOf(object)) {
+          for (const value of Object.values(material as any)) {
             if (value instanceof THREE.Texture) value.dispose();
           }
           material.dispose();

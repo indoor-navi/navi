@@ -6,7 +6,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { Camera, LocateFixed, MapPin, Plus, Route, Send, Trash2, X } from 'lucide-react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
-import { createFloorScene, MODEL_URL, type ViewMode } from '@/lib/three/floorScene';
+import { createFloorScene, DEFAULT_MOVE_SETTINGS, MODEL_URL, type CameraPreset, type GizmoMode, type MoveDir, type ViewMode } from '@/lib/three/floorScene';
 import { buildRoute } from '@/lib/three/route';
 import { makePin } from '@/lib/three/pins';
 import { findEntranceNode, findPath, pathLength, connectedComponents, type GEdge, type GNode } from '@/lib/wayfinding/graph';
@@ -18,7 +18,7 @@ type LandmarkType = 'corridor' | 'staircase' | 'elevator' | 'double-door';
 export interface MapEditorData {
   floors: Array<{ _id: Id<'floors'>; name: string; level: number }>;
   nodes: Array<{
-    _id: Id<'nodes'>; floorId: Id<'floors'>; label: string; position?: Position;
+    _id: Id<'nodes'>; floorId: Id<'floors'>; label: string; position?: Position; yaw?: number;
     isLandmark: boolean; landmarkType?: LandmarkType;
   }>;
   connections: Array<{
@@ -29,6 +29,12 @@ export interface MapEditorData {
     _id: Id<'destinations'>; name: string; floorId: Id<'floors'>; targetNodeId: Id<'nodes'>; description: string;
   }>;
   overrides: Array<{ floorId: Id<'floors'>; meshKey: string; color?: string; textureUrl?: string; tiling?: number }>;
+  viewpoints: Array<{ _id: Id<'viewpoints'>; floorId: Id<'floors'>; name: string; position: Position; yaw: number; pitch: number }>;
+  viewSettings: {
+    eyeHeight: number; walkSpeed: number; runSpeed: number; turnSpeed: number; fov: number;
+    headBob: boolean; collisions: boolean; guideSpeed: number;
+    hiddenMeshes: string[]; startPosition: Position | null; startYaw: number | null;
+  };
 }
 
 /** Point the admin just clicked on the floor, waiting for a name before it is saved. */
@@ -55,6 +61,32 @@ function disposeObject(obj: any) {
 
 const isShown = (o: any) => { let p = o; while (p) { if (p.visible === false) return false; p = p.parent; } return true; };
 
+const radToDeg = (r: number) => Math.round(((r * 180) / Math.PI) * 10) / 10;
+const degToRad = (d: number) => (d * Math.PI) / 180;
+
+/** A button that keeps firing while it is held down (smooth camera movement). */
+function RepeatButton({ onFire, children, label, className = '' }: { onFire: () => void; children: React.ReactNode; label: string; className?: string }) {
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stop = () => { if (timer.current) { clearInterval(timer.current); timer.current = null; } };
+  useEffect(() => stop, []);
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      className={`rounded-lg bg-white/5 hover:bg-white/10 active:bg-blue-600 border border-white/10 py-1.5 text-sm select-none touch-none ${className}`}
+      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); onFire(); stop(); timer.current = setInterval(onFire, 55); }}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onLostPointerCapture={stop}
+    >
+      {children}
+    </button>
+  );
+}
+
+type GizmoChoice = 'off' | GizmoMode;
+
 export default function MapEditor3D({
   focusNodeId = null,
   onFocusDone,
@@ -69,6 +101,10 @@ export default function MapEditor3D({
   const addDestination = useMutation(api.mapAdmin.addDestination3D);
   const ensureFloor = useMutation(api.mapAdmin.ensureDefaultFloor);
   const publishMap = useMutation(api.mapAdmin.publishMap);
+  const updateTransform = useMutation(api.mapAdmin.updateNodeTransform);
+  const saveViewSettings = useMutation(api.mapAdmin.saveViewSettings);
+  const addViewpoint = useMutation(api.mapAdmin.addViewpoint);
+  const deleteViewpoint = useMutation(api.mapAdmin.deleteViewpoint);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const fsRef = useRef<any>(null);
@@ -79,6 +115,10 @@ export default function MapEditor3D({
   const lastAddedRef = useRef<Id<'nodes'> | null>(null);
   const clickRef = useRef<(x: number, y: number) => void>(() => {});
   const liveRef = useRef({ showNodes: true, showPaths: true, viewMode: '3d' as ViewMode });
+  const gizmoRef = useRef<GizmoChoice>('off');
+  const selectedIdRef = useRef<Id<'nodes'> | null>(null);
+  const gizmoCommitRef = useRef<(obj: any) => void>(() => {});
+  const gizmoLiveRef = useRef<(obj: any) => void>(() => {});
 
   const [sceneReady, setSceneReady] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -101,6 +141,15 @@ export default function MapEditor3D({
   const [draft, setDraft] = useState<Draft | null>(null);
   const [tick, setTick] = useState(0);
   const [routeInfo, setRouteInfo] = useState('');
+  const [gizmo, setGizmo] = useState<GizmoChoice>('off');
+  const [snap, setSnap] = useState(true);
+  const [nudgeStep, setNudgeStep] = useState(0.25);
+  const [yawDeg, setYawDeg] = useState(0);
+  const [flySpeed, setFlySpeed] = useState(1);
+  const [vpName, setVpName] = useState('');
+  const [vs, setVs] = useState({ ...DEFAULT_MOVE_SETTINGS });
+  const [vsLoaded, setVsLoaded] = useState(false);
+  const [baking, setBaking] = useState<number | null>(null);
 
   const activeFloorId: Id<'floors'> = (floorId || data?.floors?.[0]?._id || '') as Id<'floors'>;
   const allNodes = data?.nodes ?? [];
@@ -112,6 +161,8 @@ export default function MapEditor3D({
   const entranceNode = findEntranceNode(floorNodes.filter((n) => n.position).map((n) => ({ id: n._id, label: n.label, position: n.position! })));
 
   liveRef.current = { showNodes, showPaths, viewMode };
+  gizmoRef.current = gizmo;
+  selectedIdRef.current = selectedId;
 
   /* toasts fade on their own */
   useEffect(() => {
@@ -128,7 +179,7 @@ export default function MapEditor3D({
   /* ───────────────────── 3D scene lifecycle ───────────────────── */
   useEffect(() => {
     let cancelled = false;
-    let offFrame: any; let offClick: any;
+    let offFrame: any; let offClick: any; let offGizmoChange: any; let offGizmoCommit: any;
     (async () => {
       try {
         const fs = await createFloorScene(containerRef.current!, MODEL_URL, { hideRoof: true });
@@ -153,13 +204,15 @@ export default function MapEditor3D({
         });
         // click (not drag) → always goes through the ref so it sees the CURRENT tool / floor / selection
         offClick = fs.onClick((x: number, y: number) => clickRef.current(x, y));
+        offGizmoChange = fs.onGizmoChange((obj: any) => gizmoLiveRef.current(obj));
+        offGizmoCommit = fs.onGizmoCommit((obj: any) => gizmoCommitRef.current(obj));
       } catch (err) {
         setLoadError(err instanceof Error ? err.message : 'The 3D map could not be loaded.');
       }
     })();
     return () => {
       cancelled = true;
-      offFrame?.(); offClick?.();
+      offFrame?.(); offClick?.(); offGizmoChange?.(); offGizmoCommit?.();
       fsRef.current?.dispose();
       fsRef.current = null;
     };
@@ -244,6 +297,7 @@ export default function MapEditor3D({
     if (n?.position) setPos({ x: n.position.x, y: n.position.y, z: n.position.z });
     setIsLandmark(n?.isLandmark ?? false);
     setLandmarkType(n?.landmarkType ?? 'corridor');
+    setYawDeg(radToDeg(n?.yaw ?? 0));
     const d = (data?.destinations ?? []).find((dd) => dd.targetNodeId === nodeId);
     setDestName(d?.name ?? '');
     setDestDesc(d?.description ?? '');
@@ -280,12 +334,24 @@ export default function MapEditor3D({
       const pin = await makePin(color, n.label);
       pin.position.set(n.position.x, n.position.y, n.position.z);
       pin.userData.nodeId = n._id;
+      pin.rotation.y = n.yaw ?? 0;
+      // little arrow showing which way a visitor faces when standing on this node (rotate tool)
+      const arrow = new fs.THREE.Mesh(
+        new fs.THREE.ConeGeometry(0.09, 0.32, 12),
+        new fs.THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      arrow.rotation.x = -Math.PI / 2;
+      arrow.position.set(0, 0.42, -0.42);
+      pin.add(arrow);
       pin.visible = showNodes;
       pin.traverse((o: any) => { if (o.isSprite) o.visible = showLabels; });
       return [String(n._id), pin] as const;
     })).then(async (entries) => {
       if (cancelled) { entries.forEach(([, p]) => disposeObject(p)); return; }
       for (const [id, pin] of entries) { fs.scene.add(pin); pinsRef.current.set(id, pin); }
+      // keep the move / rotate gizmo glued to the selected node after the pins are rebuilt
+      const gp = selectedIdRef.current ? pinsRef.current.get(String(selectedIdRef.current)) : null;
+      if (gizmoRef.current !== 'off' && gp) fs.attachGizmo(gp, gizmoRef.current); else fs.detachGizmo();
       if (draft) {
         const ghost = await makePin(0xf59e0b, draft.name || 'New point');
         if (cancelled) { disposeObject(ghost); return; }
@@ -328,6 +394,118 @@ export default function MapEditor3D({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNodeId, sceneReady, data]);
 
+  /* ───────────────────── transform gizmo (move / rotate) + camera + visitor view ───────────────────── */
+  const yawOf = (obj: any) => {
+    // read the facing direction from the quaternion (Euler y flips beyond ±90°)
+    const f = new fsRef.current.THREE.Vector3(0, 0, -1).applyQuaternion(obj.quaternion);
+    return Math.atan2(-f.x, -f.z) as number;
+  };
+  gizmoLiveRef.current = (obj: any) => {
+    setPos({ x: round2(obj.position.x), y: round2(obj.position.y), z: round2(obj.position.z) });
+    setYawDeg(radToDeg(yawOf(obj)));
+  };
+  gizmoCommitRef.current = async (obj: any) => {
+    const id = obj?.userData?.nodeId as Id<'nodes'> | undefined;
+    if (!id) return;
+    try {
+      await updateTransform({
+        token, _id: id,
+        position: { x: round2(obj.position.x), y: round2(obj.position.y), z: round2(obj.position.z) },
+        yaw: yawOf(obj),
+      });
+      setNotice('Position saved to the database.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the new position.');
+    }
+  };
+
+  useEffect(() => {
+    const fs = fsRef.current;
+    if (!fs || !sceneReady) return;
+    fs.setGizmoSnap(snap ? 0.25 : null, snap ? 15 : null);
+    const pin = selectedId ? pinsRef.current.get(String(selectedId)) : null;
+    if (gizmo !== 'off' && pin) fs.attachGizmo(pin, gizmo); else fs.detachGizmo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gizmo, snap, sceneReady]);
+
+  useEffect(() => { if (sceneReady) fsRef.current?.setFlySpeed(flySpeed); }, [flySpeed, sceneReady]);
+
+  /* visitor settings: load once from the database, then preview live in the Inside view */
+  useEffect(() => {
+    if (!data?.viewSettings || vsLoaded) return;
+    const s = data.viewSettings;
+    queueMicrotask(() => {
+      setVs({ eyeHeight: s.eyeHeight, walkSpeed: s.walkSpeed, runSpeed: s.runSpeed, turnSpeed: s.turnSpeed, fov: s.fov, headBob: s.headBob, collisions: s.collisions, guideSpeed: s.guideSpeed });
+      setVsLoaded(true);
+    });
+  }, [data?.viewSettings, vsLoaded]);
+  useEffect(() => { if (sceneReady) fsRef.current?.setSettings(vs); }, [vs, sceneReady]);
+  const hiddenList = data?.viewSettings?.hiddenMeshes;
+  useEffect(() => { if (sceneReady) fsRef.current?.setHiddenMeshes(hiddenList ?? []); }, [hiddenList, sceneReady]);
+
+  const nudgeNode = async (dx: number, dy: number, dz: number) => {
+    if (!selectedId || !selected?.position) return setError('Select a node first.');
+    const next = { x: round2(pos.x + dx), y: round2(pos.y + dy), z: round2(pos.z + dz) };
+    setPos(next);
+    try { await updateTransform({ token, _id: selectedId, position: next }); } catch (err) { setError(err instanceof Error ? err.message : 'Could not move the node.'); }
+  };
+  const rotateNodeBy = async (deltaDeg: number) => {
+    if (!selectedId) return setError('Select a node first.');
+    let d = yawDeg + deltaDeg;
+    d = ((((d + 180) % 360) + 360) % 360) - 180;
+    setYawDeg(radToDeg(degToRad(d)));
+    try { await updateTransform({ token, _id: selectedId, yaw: degToRad(d) }); } catch (err) { setError(err instanceof Error ? err.message : 'Could not rotate the node.'); }
+  };
+
+  const applyPreset = (preset: CameraPreset) => { setViewMode('3d'); fsRef.current?.setPreset(preset); };
+  const cam = (dir: MoveDir) => fsRef.current?.moveCamera(dir, 1);
+  const camRot = (yaw: number, pitch = 0) => fsRef.current?.rotateCamera(yaw, pitch);
+
+  const saveViewpointHere = async () => {
+    const fs = fsRef.current;
+    if (!fs || !activeFloorId) return;
+    if (!vpName.trim()) return setError('Type a name for this viewpoint first.');
+    const f = fs.getFpv();
+    try {
+      await addViewpoint({
+        token, floorId: activeFloorId, name: vpName.trim(),
+        position: { x: round2(f.x), y: round2(f.y), z: round2(f.z) }, yaw: f.yaw, pitch: f.pitch,
+      });
+      setVpName('');
+      setNotice('Viewpoint saved — visitors can jump to it. (Saved from the Inside camera position.)');
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the viewpoint.'); }
+  };
+  const goToViewpoint = (vp: { position: Position; yaw: number; pitch: number }) => {
+    fsRef.current?.goInside(vp.position, vp.yaw, vp.pitch);
+    setViewMode('inside');
+  };
+
+  const saveVs = async (extra: { startPosition?: Position; startYaw?: number; hiddenMeshes?: string[] } = {}) => {
+    try {
+      await saveViewSettings({ token, ...vs, ...extra });
+      setNotice('Visitor movement settings saved to the database.');
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the settings.'); }
+  };
+  const setVisitorStart = async () => {
+    const fs = fsRef.current;
+    if (!fs) return;
+    const f = fs.getFpv();
+    await saveVs({ startPosition: { x: round2(f.x), y: round2(f.y), z: round2(f.z) }, startYaw: f.yaw });
+    setNotice('Visitors will now start exactly where the Inside camera is standing.');
+  };
+  const bakeVisibility = async () => {
+    const fs = fsRef.current;
+    if (!fs || baking !== null) return;
+    setBaking(0); setError('');
+    try {
+      const names: string[] = await fs.computeHiddenMeshes((p: number) => setBaking(p));
+      if (!names.length) { setNotice('Nothing outside was found to hide — visitors will see the whole model.'); }
+      await saveViewSettings({ token, ...vs, hiddenMeshes: names });
+      if (names.length) setNotice(`Preloaded: ${names.length} outside-only parts are now hidden for visitors (saved to the database).`);
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not analyse the building.'); }
+    finally { setBaking(null); }
+  };
+
   /* ───────────────────── actions ───────────────────── */
   const saveDraft = async () => {
     if (!draft) return;
@@ -359,6 +537,7 @@ export default function MapEditor3D({
     setSaving(true); setError(''); setNotice('');
     try {
       await updateNode({ token, _id: selectedId, label: label.trim(), position: pos, isLandmark, landmarkType: isLandmark ? landmarkType : undefined });
+      await updateTransform({ token, _id: selectedId, yaw: degToRad(yawDeg) });
       setNotice('Node saved.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to save the node.');
@@ -447,14 +626,18 @@ export default function MapEditor3D({
     const fs = fsRef.current;
     if (!fs || !value) return;
     setViewMode('inside');
-    if (value === '__entrance__') { fs.goInside(entranceNode?.position ?? undefined, 0); return; }
+    if (value === '__entrance__') {
+      const en = entranceNode ? floorNodes.find((x) => x._id === entranceNode.id) : undefined;
+      fs.goInside(entranceNode?.position ?? undefined, en?.yaw ?? 0);
+      return;
+    }
     const n = floorNodes.find((x) => x._id === value);
     if (!n?.position) return;
     const link = (data?.connections ?? []).find((c) => c.fromNodeId === n._id || c.toNodeId === n._id);
     const otherId = link ? (link.fromNodeId === n._id ? link.toNodeId : link.fromNodeId) : null;
     const other = otherId ? floorNodes.find((x) => x._id === otherId)?.position : undefined;
     // yaw 0 faces −Z; face the neighbouring node so the camera "looks down the path"
-    const yaw = other ? Math.atan2(-(other.x - n.position.x), -(other.z - n.position.z)) : 0;
+    const yaw = typeof n.yaw === 'number' ? n.yaw : other ? Math.atan2(-(other.x - n.position.x), -(other.z - n.position.z)) : 0;
     fs.goInside(n.position, yaw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [floorNodes, data, entranceNode]);
@@ -467,7 +650,7 @@ export default function MapEditor3D({
     { id: 'connect', name: 'Connect Nodes', hint: 'Click node A, then node B' },
   ];
   const activeTool = tools.find((t) => t.id === tool)!;
-  const insideHint = 'Drag to look · W A S D walk · Shift run · Q/E turn · wheel = zoom';
+  const insideHint = 'Drag to look · W A S D walk · Shift run · Q/E or ←/→ turn · wheel = zoom';
   const orbitHint = '3D: left-drag rotate · right-drag pan · wheel zoom · W A S D fly · Q/E down/up';
   const planHint = '2D: drag to pan in any direction · wheel zoom · W A S D / arrows pan';
 
@@ -505,6 +688,26 @@ export default function MapEditor3D({
               {t.name}
             </button>
           ))}
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-slate-400">Transform selected node</p>
+          <div className="grid grid-cols-3 gap-1 text-xs">
+            {([['off', 'Off'], ['translate', 'Move'], ['rotate', 'Rotate']] as const).map(([m, name]) => (
+              <button key={m}
+                onClick={() => {
+                  if (m !== 'off' && !selectedId) { setError('Select a node pin first, then pick Move or Rotate.'); return; }
+                  setGizmo(m); if (m !== 'off') { setTool('select'); setNotice(m === 'translate' ? 'Drag the arrows to move the node, then release — it saves automatically.' : 'Drag the ring to set which way visitors face on this node.'); }
+                }}
+                className={`py-1.5 rounded-lg border border-white/10 ${gizmo === m ? 'bg-blue-600 text-white' : 'bg-white/5 hover:bg-white/10'}`}>{name}</button>
+            ))}
+          </div>
+          <button onClick={() => setSnap(!snap)} className="w-full flex items-center justify-between text-xs">
+            <span>Snap (0.25 m / 15°)</span>
+            <span className={`w-8 h-4 rounded-full relative transition-colors ${snap ? 'bg-blue-500' : 'bg-white/15'}`}>
+              <span className={`absolute top-0.5 size-3 rounded-full bg-white transition-all ${snap ? 'left-[18px]' : 'left-0.5'}`} />
+            </span>
+          </button>
         </div>
 
         <div className="space-y-2">
@@ -549,6 +752,91 @@ export default function MapEditor3D({
             ＋ Add “Main Entrance” node<br /><span className="font-normal text-amber-200/70">routes start here</span>
           </button>
         )}
+
+        <details open className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-300">Camera tools</summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-[10px] text-slate-500">Hold a button to keep moving. Works in 3D, 2D and Inside.</p>
+            <div className="grid grid-cols-3 gap-1">
+              <RepeatButton label="Move up" onFire={() => cam('up')}>⤒</RepeatButton>
+              <RepeatButton label="Move forward" onFire={() => cam('forward')}>▲</RepeatButton>
+              <RepeatButton label="Move down" onFire={() => cam('down')}>⤓</RepeatButton>
+              <RepeatButton label="Move left" onFire={() => cam('left')}>◀</RepeatButton>
+              <RepeatButton label="Move back" onFire={() => cam('back')}>▼</RepeatButton>
+              <RepeatButton label="Move right" onFire={() => cam('right')}>▶</RepeatButton>
+            </div>
+            <div className="grid grid-cols-4 gap-1">
+              <RepeatButton label="Rotate left" onFire={() => camRot(0.05)}>⟲</RepeatButton>
+              <RepeatButton label="Rotate right" onFire={() => camRot(-0.05)}>⟳</RepeatButton>
+              <RepeatButton label="Tilt up" onFire={() => camRot(0, viewMode === 'inside' ? 0.04 : -0.04)}>⤒</RepeatButton>
+              <RepeatButton label="Tilt down" onFire={() => camRot(0, viewMode === 'inside' ? -0.04 : 0.04)}>⤓</RepeatButton>
+              <RepeatButton label="Zoom in" onFire={() => fsRef.current?.dollyCamera(0.94)} className="col-span-2">＋ Zoom</RepeatButton>
+              <RepeatButton label="Zoom out" onFire={() => fsRef.current?.dollyCamera(1.06)} className="col-span-2">－ Zoom</RepeatButton>
+            </div>
+            <div className="grid grid-cols-3 gap-1 text-[11px]">
+              {(['iso', 'top', 'front', 'back', 'left', 'right'] as CameraPreset[]).map((p) => (
+                <button key={p} onClick={() => applyPreset(p)} className="rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 py-1 capitalize">{p === 'iso' ? 'Iso' : p}</button>
+              ))}
+            </div>
+            <label className="block text-[11px] text-slate-400">Move speed ×{flySpeed.toFixed(1)}
+              <input type="range" min={0.3} max={4} step={0.1} value={flySpeed} onChange={(e) => setFlySpeed(Number(e.target.value))} className="w-full" />
+            </label>
+          </div>
+        </details>
+
+        <details className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-300">Viewpoints ({(data?.viewpoints ?? []).length})</summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-[10px] text-slate-500">Switch to Inside, move the camera where you want, name it and save. Visitors can jump to it.</p>
+            <div className="flex gap-1">
+              <input value={vpName} onChange={(e) => setVpName(e.target.value)} placeholder="e.g. Lobby view" maxLength={60}
+                className="min-w-0 flex-1 rounded-lg bg-white/5 border border-white/10 px-2 py-1.5 text-xs outline-none focus:border-blue-500" />
+              <button onClick={saveViewpointHere} className="rounded-lg bg-blue-600 hover:bg-blue-500 px-2.5 text-xs font-semibold">Save</button>
+            </div>
+            {(data?.viewpoints ?? []).filter((vp) => vp.floorId === activeFloorId).map((vp) => (
+              <div key={vp._id} className="flex items-center gap-1 rounded-lg bg-white/5 px-2 py-1 text-xs">
+                <button onClick={() => goToViewpoint(vp)} className="flex-1 truncate text-left hover:text-blue-300">{vp.name}</button>
+                <button onClick={() => deleteViewpoint({ token, _id: vp._id }).then(() => setNotice('Viewpoint deleted.')).catch((e) => setError(e.message))} aria-label="Delete viewpoint" className="text-red-400 hover:text-red-300"><Trash2 className="size-3.5" /></button>
+              </div>
+            ))}
+          </div>
+        </details>
+
+        <details className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-300">Visitor movement &amp; view</summary>
+          <div className="mt-2 space-y-2 text-[11px] text-slate-400">
+            <p className="text-[10px] text-slate-500">Changes preview live in the Inside view. Visitors only ever walk inside — they cannot orbit or fly outside.</p>
+            {([
+              ['eyeHeight', 'Eye height (m)', 1.0, 2.2, 0.05],
+              ['walkSpeed', 'Walk speed (m/s)', 0.5, 5, 0.1],
+              ['runSpeed', 'Run speed (m/s)', 1, 10, 0.1],
+              ['turnSpeed', 'Turn speed (rad/s)', 0.5, 4, 0.1],
+              ['fov', 'Field of view (°)', 45, 100, 1],
+              ['guideSpeed', 'Auto-walk speed (m/s)', 0.6, 4, 0.1],
+            ] as const).map(([k, name, lo, hi, step]) => (
+              <label key={k} className="block">{name}: <span className="text-slate-200">{vs[k]}</span>
+                <input type="range" min={lo} max={hi} step={step} value={vs[k]} onChange={(e) => setVs({ ...vs, [k]: Number(e.target.value) })} className="w-full" />
+              </label>
+            ))}
+            {([['headBob', 'Head bob while walking'], ['collisions', 'Walls block movement']] as const).map(([k, name]) => (
+              <label key={k} className="flex items-center gap-2 text-slate-300">
+                <input type="checkbox" checked={vs[k]} onChange={(e) => setVs({ ...vs, [k]: e.target.checked })} />{name}
+              </label>
+            ))}
+            <button onClick={() => saveVs()} className="w-full rounded-lg bg-blue-600 hover:bg-blue-500 py-1.5 text-xs font-semibold text-white">Save movement settings</button>
+            <button onClick={setVisitorStart} className="w-full rounded-lg border border-white/10 hover:bg-white/5 py-1.5 text-xs text-slate-200">Use Inside camera as visitor start</button>
+            <div className="rounded-lg border border-white/10 p-2 space-y-1.5">
+              <p className="text-slate-300 font-semibold">Hide the outside</p>
+              <p className="text-[10px] text-slate-500">Analyses the building once and hides every part that is only visible from outside. Saved to the database, so visitors load it instantly with nothing popping in.</p>
+              <button onClick={bakeVisibility} disabled={baking !== null} className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 py-1.5 text-xs font-semibold text-white">
+                {baking === null ? `Analyse & save (${hiddenList?.length ?? 0} hidden)` : `Analysing… ${Math.round(baking * 100)}%`}
+              </button>
+              {(hiddenList?.length ?? 0) > 0 && (
+                <button onClick={() => saveVs({ hiddenMeshes: [] })} className="w-full rounded-lg border border-white/10 hover:bg-white/5 py-1 text-[11px] text-slate-300">Show everything again</button>
+              )}
+            </div>
+          </div>
+        </details>
 
         <button onClick={testRoute} className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-500 py-2 text-sm font-semibold">
           ▶ Test Route
@@ -684,6 +972,32 @@ export default function MapEditor3D({
                       onChange={(e) => setPos({ ...pos, [axis]: Number(e.target.value) })}
                       className="rounded-lg bg-white/5 border border-white/10 px-2 py-1.5 text-sm outline-none focus:border-blue-500" />
                   ))}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Facing (°) — which way visitors look here</label>
+                <div className="mt-1 flex gap-1">
+                  <input type="number" step={5} value={yawDeg} onChange={(e) => setYawDeg(Number(e.target.value))}
+                    className="min-w-0 flex-1 rounded-lg bg-white/5 border border-white/10 px-2 py-1.5 text-sm outline-none focus:border-blue-500" />
+                  <button onClick={() => rotateNodeBy(-15)} aria-label="Rotate right 15°" className="rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 px-2.5">⟳</button>
+                  <button onClick={() => rotateNodeBy(15)} aria-label="Rotate left 15°" className="rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 px-2.5">⟲</button>
+                </div>
+                <p className="mt-1 text-[10px] text-slate-500">0° looks toward −Z. Positive turns left.</p>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Nudge position — step {nudgeStep} m</label>
+                <div className="mt-1 flex gap-1 text-[11px]">
+                  {[0.05, 0.25, 1].map((st) => (
+                    <button key={st} onClick={() => setNudgeStep(st)} className={`flex-1 rounded-md border border-white/10 py-1 ${nudgeStep === st ? 'bg-blue-600' : 'bg-white/5 hover:bg-white/10'}`}>{st} m</button>
+                  ))}
+                </div>
+                <div className="mt-1 grid grid-cols-3 gap-1">
+                  <RepeatButton label="Up" onFire={() => nudgeNode(0, nudgeStep, 0)}>⤒</RepeatButton>
+                  <RepeatButton label="Forward (−Z)" onFire={() => nudgeNode(0, 0, -nudgeStep)}>▲</RepeatButton>
+                  <RepeatButton label="Down" onFire={() => nudgeNode(0, -nudgeStep, 0)}>⤓</RepeatButton>
+                  <RepeatButton label="Left (−X)" onFire={() => nudgeNode(-nudgeStep, 0, 0)}>◀</RepeatButton>
+                  <RepeatButton label="Back (+Z)" onFire={() => nudgeNode(0, 0, nudgeStep)}>▼</RepeatButton>
+                  <RepeatButton label="Right (+X)" onFire={() => nudgeNode(nudgeStep, 0, 0)}>▶</RepeatButton>
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm">

@@ -17,6 +17,29 @@ async function logAction(ctx: MutationCtx, user: Doc<"users">, action: string, e
 }
 
 const position = v.object({ x: v.number(), y: v.number(), z: v.number() });
+
+export const DEFAULT_VIEW_SETTINGS = {
+  eyeHeight: 1.6,
+  walkSpeed: 2.2,
+  runSpeed: 4.5,
+  turnSpeed: 1.8,
+  fov: 70,
+  headBob: true,
+  collisions: true,
+  guideSpeed: 1.7,
+  hiddenMeshes: [] as string[],
+};
+
+async function readViewSettings(ctx: QueryCtx) {
+  const row = await ctx.db.query("viewSettings").withIndex("by_key", (q) => q.eq("key", "default")).first();
+  if (!row) return { ...DEFAULT_VIEW_SETTINGS, startPosition: null, startYaw: null };
+  return {
+    eyeHeight: row.eyeHeight, walkSpeed: row.walkSpeed, runSpeed: row.runSpeed, turnSpeed: row.turnSpeed,
+    fov: row.fov, headBob: row.headBob, collisions: row.collisions, guideSpeed: row.guideSpeed,
+    hiddenMeshes: row.hiddenMeshes,
+    startPosition: row.startPosition ?? null, startYaw: row.startYaw ?? null,
+  };
+}
 const landmarkType = v.optional(
   v.union(v.literal("corridor"), v.literal("staircase"), v.literal("elevator"), v.literal("double-door"))
 );
@@ -26,12 +49,14 @@ export const listMapData = query({
   returns: v.any(),
   handler: async (ctx, args) => {
     await requireEditor(ctx, args.token);
-    const [floors, nodes, connections, destinations, overrides] = await Promise.all([
+    const [floors, nodes, connections, destinations, overrides, viewpoints, viewSettings] = await Promise.all([
       ctx.db.query("floors").collect(),
       ctx.db.query("nodes").collect(),
       ctx.db.query("connections").collect(),
       ctx.db.query("destinations").collect(),
       ctx.db.query("materialOverrides").collect(),
+      ctx.db.query("viewpoints").collect(),
+      readViewSettings(ctx),
     ]);
     const urls = new Map<string, string>();
     for (const o of overrides) {
@@ -40,7 +65,7 @@ export const listMapData = query({
       }
     }
     return {
-      floors, nodes, connections, destinations,
+      floors, nodes, connections, destinations, viewpoints, viewSettings,
       overrides: overrides.map((o) => ({
         _id: o._id, floorId: o.floorId, meshKey: o.meshKey,
         color: o.color, tiling: o.tiling,
@@ -55,12 +80,14 @@ export const getPublishedMap = query({
   args: {},
   returns: v.any(),
   handler: async (ctx) => {
-    const [floors, nodes, connections, destinations, overrides] = await Promise.all([
+    const [floors, nodes, connections, destinations, overrides, viewpoints, viewSettings] = await Promise.all([
       ctx.db.query("floors").collect(),
       ctx.db.query("nodes").collect(),
       ctx.db.query("connections").collect(),
       ctx.db.query("destinations").collect(),
       ctx.db.query("materialOverrides").collect(),
+      ctx.db.query("viewpoints").collect(),
+      readViewSettings(ctx),
     ]);
     const urls = new Map<string, string>();
     for (const o of overrides) {
@@ -69,9 +96,11 @@ export const getPublishedMap = query({
       }
     }
     return {
+      viewSettings,
+      viewpoints: viewpoints.map((p) => ({ _id: p._id, floorId: p.floorId, name: p.name, position: p.position, yaw: p.yaw, pitch: p.pitch })),
       floors: floors.map((f) => ({ _id: f._id, name: f.name, level: f.level, modelUrl: f.modelUrl || "" })),
       nodes: nodes.filter((n) => n.position !== undefined).map((n) => ({
-        _id: n._id, floorId: n.floorId, label: n.label, position: n.position,
+        _id: n._id, floorId: n.floorId, label: n.label, position: n.position, yaw: n.yaw,
         isLandmark: n.isLandmark, landmarkType: n.landmarkType,
       })),
       connections: connections.map((c) => ({
@@ -336,6 +365,95 @@ export const deleteMaterialOverride = mutation({
       .filter((q) => q.eq(q.field("meshKey"), args.meshKey)).first();
     if (existing) await ctx.db.delete(existing._id);
     return true;
+  },
+});
+
+/** Fast patch used by the transform gizmo / nudge pad: move and/or rotate one node. */
+export const updateNodeTransform = mutation({
+  args: { token: v.string(), _id: v.id("nodes"), position: v.optional(position), yaw: v.optional(v.number()) },
+  returns: v.id("nodes"),
+  handler: async (ctx, args) => {
+    const user = await requireEditor(ctx, args.token);
+    const node = await ctx.db.get(args._id);
+    if (!node) throw new Error("Node not found.");
+    const patch: { position?: { x: number; y: number; z: number }; yaw?: number } = {};
+    if (args.position) patch.position = args.position;
+    if (args.yaw !== undefined) patch.yaw = args.yaw;
+    await ctx.db.patch(args._id, patch);
+    if (args.position) {
+      const edges = await ctx.db.query("connections").collect();
+      for (const e of edges) {
+        if (e.fromNodeId !== args._id && e.toNodeId !== args._id) continue;
+        const a = e.fromNodeId === args._id ? { position: args.position } : await ctx.db.get(e.fromNodeId);
+        const b = e.toNodeId === args._id ? { position: args.position } : await ctx.db.get(e.toNodeId);
+        await ctx.db.patch(e._id, { estimatedWalkingTime: walkSeconds(a?.position, b?.position) });
+      }
+    }
+    await logAction(ctx, user, "transform_node", "nodes", node.label);
+    return args._id;
+  },
+});
+
+const clampNum = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+export const saveViewSettings = mutation({
+  args: {
+    token: v.string(),
+    eyeHeight: v.number(), walkSpeed: v.number(), runSpeed: v.number(), turnSpeed: v.number(),
+    fov: v.number(), headBob: v.boolean(), collisions: v.boolean(), guideSpeed: v.number(),
+    startPosition: v.optional(position), startYaw: v.optional(v.number()),
+    hiddenMeshes: v.optional(v.array(v.string())),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const user = await requireEditor(ctx, args.token);
+    const existing = await ctx.db.query("viewSettings").withIndex("by_key", (q) => q.eq("key", "default")).first();
+    const doc = {
+      key: "default",
+      eyeHeight: clampNum(args.eyeHeight, 0.8, 2.4),
+      walkSpeed: clampNum(args.walkSpeed, 0.5, 6),
+      runSpeed: clampNum(args.runSpeed, 1, 12),
+      turnSpeed: clampNum(args.turnSpeed, 0.4, 5),
+      fov: clampNum(args.fov, 40, 100),
+      headBob: args.headBob,
+      collisions: args.collisions,
+      guideSpeed: clampNum(args.guideSpeed, 0.5, 5),
+      startPosition: args.startPosition ?? existing?.startPosition,
+      startYaw: args.startYaw ?? existing?.startYaw,
+      hiddenMeshes: (args.hiddenMeshes ?? existing?.hiddenMeshes ?? []).slice(0, 500),
+      updatedAt: Date.now(),
+    };
+    if (existing) await ctx.db.replace(existing._id, doc);
+    else await ctx.db.insert("viewSettings", doc);
+    await logAction(ctx, user, "save_view_settings", "viewSettings");
+    return true;
+  },
+});
+
+export const addViewpoint = mutation({
+  args: { token: v.string(), floorId: v.id("floors"), name: v.string(), position, yaw: v.number(), pitch: v.number() },
+  returns: v.id("viewpoints"),
+  handler: async (ctx, args) => {
+    const user = await requireEditor(ctx, args.token);
+    const name = args.name.trim();
+    if (!name) throw new Error("Give the viewpoint a name.");
+    if (name.length > 60) throw new Error("Viewpoint name is too long (max 60 characters).");
+    const id = await ctx.db.insert("viewpoints", {
+      floorId: args.floorId, name, position: args.position, yaw: args.yaw, pitch: args.pitch, createdAt: Date.now(),
+    });
+    await logAction(ctx, user, "add_viewpoint", "viewpoints", name);
+    return id;
+  },
+});
+
+export const deleteViewpoint = mutation({
+  args: { token: v.string(), _id: v.id("viewpoints") },
+  returns: v.id("viewpoints"),
+  handler: async (ctx, args) => {
+    const user = await requireEditor(ctx, args.token);
+    await ctx.db.delete(args._id);
+    await logAction(ctx, user, "delete_viewpoint", "viewpoints");
+    return args._id;
   },
 });
 

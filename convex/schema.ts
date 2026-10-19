@@ -24,6 +24,8 @@ export default defineSchema({
     ),
     // 3D position in the GLB scene (metres, Y-up)
     position: v.optional(v.object({ x: v.number(), y: v.number(), z: v.number() })),
+    // Facing direction in radians (0 = looking toward -Z). Set with the admin rotate tool.
+    yaw: v.optional(v.number()),
   }),
 
   connections: defineTable({
@@ -49,6 +51,33 @@ export default defineSchema({
     textureStorageId: v.optional(v.id("_storage")),
     tiling: v.optional(v.number()),
     updatedAt: v.number(),
+  }).index("by_floor", ["floorId"]),
+
+  // Visitor (first-person) camera and movement settings, edited by admins, read by the navigation app.
+  viewSettings: defineTable({
+    key: v.string(),
+    eyeHeight: v.number(),
+    walkSpeed: v.number(),
+    runSpeed: v.number(),
+    turnSpeed: v.number(),
+    fov: v.number(),
+    headBob: v.boolean(),
+    collisions: v.boolean(),
+    guideSpeed: v.number(),
+    startPosition: v.optional(v.object({ x: v.number(), y: v.number(), z: v.number() })),
+    startYaw: v.optional(v.number()),
+    hiddenMeshes: v.array(v.string()),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+
+  // Named camera spots saved by admins; visitors can jump to them.
+  viewpoints: defineTable({
+    floorId: v.id("floors"),
+    name: v.string(),
+    position: v.object({ x: v.number(), y: v.number(), z: v.number() }),
+    yaw: v.number(),
+    pitch: v.number(),
+    createdAt: v.number(),
   }).index("by_floor", ["floorId"]),
 
   qrCodes: defineTable({
