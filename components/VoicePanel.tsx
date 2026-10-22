@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
-import { Bot, Landmark, Navigation, PlayCircle, Send, User, Volume2 } from 'lucide-react';
+import { Bot, Landmark, Map, Navigation, Send, User, Volume2 } from 'lucide-react';
 import VoiceAuraScene from './VoiceAuraScene';
 import type { ActiveQrCode, AgentState, AppMode, ChatMessage, SlideData } from './types';
 
@@ -92,8 +92,8 @@ export default function VoicePanel({
           <button type="submit" disabled={!typedMessage.trim() || isThinking || isStreaming} aria-label="Send destination or question" className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-cyan-500 text-zinc-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30 sm:size-9 sm:rounded-xl"><Send className="size-4" /></button>
         </form>
         <div className="flex min-w-0 items-center justify-end gap-1.5 sm:gap-2">
-          <Link href={destination ? `/directions?destination=${encodeURIComponent(destination)}` : '/directions'} aria-label="Open video directions" className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900 px-2 py-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition hover:border-cyan-500/50 hover:text-cyan-300 sm:px-3 sm:py-1.5">
-            <PlayCircle className="size-3.5" /><span className="hidden sm:inline">Video directions</span>
+          <Link href={destination ? `/directions?destination=${encodeURIComponent(destination)}` : '/directions'} aria-label="Open 3D map" className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900 px-2 py-2 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition hover:border-cyan-500/50 hover:text-cyan-300 sm:px-3 sm:py-1.5">
+            <Map className="size-3.5" /><span className="hidden sm:inline">3D Map</span>
           </Link>
           <div aria-label={`NaviSense ${agentState}`} className={`hidden items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider md:flex ${agentState === 'listening' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-400' : agentState === 'thinking' ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'border-purple-500/30 bg-purple-500/10 text-purple-400' : 'border-zinc-800 bg-zinc-900 text-zinc-600'}`}>
             <div className={`size-1.5 rounded-full ${agentState === 'listening' ? 'animate-pulse bg-cyan-400' : agentState === 'thinking' ? 'animate-thinking bg-amber-400' : agentState === 'speaking' || agentState === 'navigating' ? 'animate-pulse bg-purple-400' : 'bg-zinc-600'}`} />

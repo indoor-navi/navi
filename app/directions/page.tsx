@@ -1,4 +1,4 @@
-import DirectionsExperience from '@/components/DirectionsExperience';
+import Nav3DExperience from '@/components/Nav3DExperience';
 
 export default async function DirectionsPage({
   searchParams,
@@ -6,6 +6,5 @@ export default async function DirectionsPage({
   searchParams: Promise<{ destination?: string }>;
 }) {
   const params = await searchParams;
-
-  return <DirectionsExperience initialDestination={params.destination || ''} />;
+  return <Nav3DExperience initialDestination={params.destination || ''} />;
 }
