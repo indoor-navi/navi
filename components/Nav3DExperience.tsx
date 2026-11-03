@@ -2,16 +2,21 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import {
   ArrowLeft, ArrowUp, ChevronLeft, ChevronRight, CornerUpLeft, CornerUpRight, Flag, List, MapPin,
-  Pause, Play, RotateCcw, Send, Square, X,
+  Pause, Play, RotateCcw, Send, Square, Volume2, VolumeX, X,
 } from 'lucide-react';
-import { createFloorScene, MODEL_URL, type Cue, type GuideState, type PoseUpdate } from '@/lib/three/floorScene';
+import type { Cue, GuideState, PoseUpdate } from '@/lib/three/floorScene';
+import { attachScene, getScene, prepareScene, preloadScene, startPose } from '@/lib/three/sceneStore';
+import { getSceneStatus, getServerSceneStatus, subscribeSceneStatus } from '@/lib/three/sceneStatus';
 import { buildRoute } from '@/lib/three/route';
 import { findPath, nearestNode, pickStartNode, type GEdge, type GNode } from '@/lib/wayfinding/graph';
+import { ARRIVED_LINE, PAUSED_LINE, type RouteStop } from '@/lib/wayfinding/describe';
+import { analyseStops, requestGuidance, speechSeconds, takePlan, type AnalysedLeg } from '@/lib/wayfinding/plan';
+import { speak, stopSpeaking } from '@/lib/voice/speak';
 
 interface Msg { role: 'user' | 'assistant'; content: string; }
 type Status = 'idle' | 'routing' | 'paused' | 'done';
@@ -105,10 +110,26 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
   const guideKeyRef = useRef('');
   const routeLabelRef = useRef('');
   const mapDataRef = useRef<any>(null);
+  const mutedRef = useRef(false);
+  const chainRef = useRef<Promise<void>>(Promise.resolve());
+  const queuedRef = useRef(0);
+  const epochRef = useRef(0);
+  const briefRef = useRef('');
+  const legsRef = useRef<AnalysedLeg[]>([]);
+  const stepsRef = useRef<string[]>([]);
+  const spokenLegRef = useRef(-1);
+  const routeLenRef = useRef(1);
+  const paceRef = useRef(1);
+  const userMultRef = useRef(1);
+  const arrivalLineRef = useRef('');
+  const routeSeqRef = useRef(0);
+  const wasPausedRef = useRef(false);
+  const userPausedRef = useRef(false);
 
+  const loadStatus = useSyncExternalStore(subscribeSceneStatus, getSceneStatus, getServerSceneStatus);
   const [sceneReady, setSceneReady] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [prep, setPrep] = useState<{ busy: boolean; p: number }>({ busy: false, p: 0 });
+  const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([
     { role: 'assistant', content: 'Hi! Where would you like to go?' },
   ]);
@@ -124,6 +145,37 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
   const pushMsg = useCallback((role: Msg['role'], content: string) => {
     setMessages((m) => [...m.slice(-12), { role, content }]);
   }, []);
+
+  /**
+   * Narrator: lines are spoken one after another and are NEVER cut off by a newer line — they wait their turn.
+   * (Only Stop / mute / leaving the page cancels what is queued.)
+   */
+  const say = useCallback((text: string): Promise<void> => {
+    if (mutedRef.current || !text) return Promise.resolve();
+    const epoch = epochRef.current;
+    queuedRef.current += 1;
+    const run = chainRef.current
+      .then(async () => {
+        if (epoch !== epochRef.current || mutedRef.current) return;
+        try { await speak(text); } catch { /* voice is a nice-to-have — the text is always shown */ }
+      })
+      .then(() => { queuedRef.current -= 1; });
+    chainRef.current = run;
+    return run;
+  }, []);
+  const cancelSpeech = useCallback(() => { epochRef.current += 1; stopSpeaking(); }, []);
+
+  /** Walking pace = the leg's own pace, matched to how long its sentence takes to say, times the visitor's speed button. */
+  function applyPace() {
+    fsRef.current?.setGuideSpeed(paceRef.current * userMultRef.current);
+  }
+
+  const toggleMute = () => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    if (next) { cancelSpeech(); fsRef.current?.setGuideHold(false); paceRef.current = 1; applyPace(); }
+  };
 
   /* ───────────── minimap (2D, north-up, follows the visitor's heading) ───────────── */
   const drawMinimap = useCallback(() => {
@@ -177,16 +229,19 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     }
   }, []);
 
-  /* ───────────── scene lifecycle ───────────── */
+  /* ───────────── scene lifecycle ─────────────
+     The 3D building is built ONCE at app start (ScenePreloader). Here we only move the finished canvas
+     into view — normally instant — and hook up this page's listeners. */
   useEffect(() => {
     let cancelled = false;
     const offs: Array<() => void> = [];
+    let park: () => void = () => {};
     (async () => {
       try {
-        const fs = await createFloorScene(containerRef.current!, MODEL_URL, { role: 'visitor' });
-        if (cancelled) { fs.dispose(); return; }
+        const fs = await preloadScene();   // already resolved when the app preloaded it
+        if (cancelled || !containerRef.current) return;
         fsRef.current = fs;
-        fs.setViewMode('inside');          // visitors are ALWAYS inside — the outside is never shown
+        park = attachScene(containerRef.current);
         setSceneReady(true);
 
         offs.push(fs.onFrame((t: number, dt: number) => {
@@ -204,90 +259,101 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
           const g = pose.guide;
           const key = g ? `${g.active}|${g.paused}|${g.cue}|${Math.round(g.remaining * 2)}|${g.turnIn === null ? '-' : Math.round(g.turnIn)}` : 'none';
           if (key !== guideKeyRef.current) { guideKeyRef.current = key; setGuide(g); }
+          announceGuideRef.current(g);
         }));
         offs.push(fs.onArrive(() => {
           setStatus('done');
-          pushMsg('assistant', `You have arrived at ${routeLabelRef.current}.`);
+          const line = arrivalLineRef.current || ARRIVED_LINE(routeLabelRef.current);
+          pushMsg('assistant', line);
+          void say(line);        // queued: it starts only after the last step has been said in full
         }));
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Unknown model loading error';
-        setLoadError(`Could not load the 3D model at ${MODEL_URL}: ${reason}`);
+        setLoadError(`Could not load the 3D building: ${reason}`);
       }
     })();
     return () => {
       cancelled = true;
       offs.forEach((fn) => fn());
-      fsRef.current?.dispose();
+      cancelSpeech();
+      // leave the shared scene clean for the next visit
+      getScene()?.stopGuide();
+      routeRef.current?.dispose();
+      routeRef.current = null;
+      for (const p of pinsRef.current) p.removeFromParent?.();
+      pinsRef.current = [];
+      destPinRef.current = null;
+      park();
       fsRef.current = null;
     };
-  }, [drawMinimap, pushMsg]);
+  }, [drawMinimap, pushMsg, say, cancelSpeech]);
 
-  /* movement settings + overrides come from the database */
+  /* make sure the interior is prepared (normally already done in the background at app start) */
   useEffect(() => {
-    const fs = fsRef.current;
-    if (!sceneReady || !fs || !mapData) return;
-    fs.applyOverrides(mapData.overrides ?? []);
-    const s = mapData.viewSettings;
-    if (s) fs.setSettings({
-      eyeHeight: s.eyeHeight, walkSpeed: s.walkSpeed, runSpeed: s.runSpeed, turnSpeed: s.turnSpeed,
-      fov: s.fov, headBob: s.headBob, collisions: s.collisions, guideSpeed: s.guideSpeed,
-    });
-  }, [mapData, sceneReady]);
+    if (mapData) void prepareScene(mapData);
+  }, [mapData]);
 
-  /* Preload: hide everything that is only visible from outside. Uses the list baked into the DB
-     by the admin; falls back to a one-off local calculation (cached in this browser). */
-  const hiddenKey = (mapData?.viewSettings?.hiddenMeshes ?? []).join('|');
+  /**
+   * Keeps the voice and the walk in step, every frame:
+   *  • when the visitor starts a new stretch of the green line, the AI's line for that stretch is spoken,
+   *    and the walking pace is set so the stretch takes about as long as the sentence;
+   *  • if the sentence is still running when the end of the stretch (the bend / the destination) is about to
+   *    be reached, the walk waits there until the sentence is finished — so nothing is cut off and nothing
+   *    is said only after arriving.
+   */
+  const announceGuideRef = useRef<(g: GuideState | null) => void>(() => {});
   useEffect(() => {
-    const fs = fsRef.current;
-    if (!sceneReady || !fs || !mapData) return;
-    const baked: string[] = mapData.viewSettings?.hiddenMeshes ?? [];
-    if (baked.length) { fs.setHiddenMeshes(baked); return; }
-    let cancelled = false;
-    const cacheKey = `navi-hidden-v1:${MODEL_URL}:${fs.meshNames().length}`;
-    try {
-      const cached = window.localStorage.getItem(cacheKey);
-      if (cached) { fs.setHiddenMeshes(JSON.parse(cached)); return; }
-    } catch { /* storage unavailable — just compute */ }
-    queueMicrotask(() => { if (!cancelled) setPrep({ busy: true, p: 0 }); });
-    fs.computeHiddenMeshes((p: number) => { if (!cancelled) setPrep({ busy: true, p }); }).then((names: string[]) => {
-      if (cancelled) return;
-      fs.setHiddenMeshes(names);
-      try { window.localStorage.setItem(cacheKey, JSON.stringify(names)); } catch { /* ignore */ }
-      setPrep({ busy: false, p: 1 });
-    }).catch(() => { if (!cancelled) setPrep({ busy: false, p: 1 }); });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sceneReady, !!mapData, hiddenKey]);
+    announceGuideRef.current = (g) => {
+      const fs = fsRef.current;
+      if (!g || !g.active) { wasPausedRef.current = false; fs?.setGuideHold(false); return; }
+      if (g.paused) {
+        // the visitor grabbed the controls: remind them how to stay on / rejoin the line
+        if (!wasPausedRef.current && !userPausedRef.current) { pushMsg('assistant', PAUSED_LINE); void say(PAUSED_LINE); }
+        wasPausedRef.current = true;
+        return;
+      }
+      wasPausedRef.current = false;
+      userPausedRef.current = false;
+      const legs = legsRef.current;
+      if (!fs || !legs.length) return;
+
+      let i = legs.findIndex((l) => g.progress < l.endFrac - 1e-6);
+      if (i < 0) i = legs.length - 1;
+      if (i !== spokenLegRef.current) {
+        spokenLegRef.current = i;
+        const step = stepsRef.current[i] ?? '';
+        const base = fs.getSettings().guideSpeed || 1.7;
+        paceRef.current = mutedRef.current || !step ? 1 : Math.min(1.6, Math.max(0.55, legs[i].distance / (speechSeconds(step) * base)));
+        applyPace();
+        void say(step);
+      }
+      const metresToLegEnd = (legs[i].endFrac - g.progress) * routeLenRef.current;
+      fs.setGuideHold(queuedRef.current > 0 && metresToLegEnd < 1.0);
+    };
+  }, [pushMsg, say]);
 
   /* Place the visitor INSIDE at the entrance / start point, facing into the building. */
   useEffect(() => {
     const fs = fsRef.current;
     if (!sceneReady || !fs || !mapData || placedRef.current) return;
     placedRef.current = true;
-    const ns: GNode[] = (mapData.nodes ?? []).map((n: any) => ({ id: n._id, label: n.label, position: n.position }));
-    const s = mapData.viewSettings;
-    const startId = ns.length ? pickStartNode(ns) : null;
-    const startNode = startId ? (mapData.nodes as any[]).find((n) => n._id === startId) : null;
-    const pos = s?.startPosition ?? startNode?.position ?? fs.entranceStart;
-    let yaw = 0;
-    if (typeof startNode?.yaw === 'number') yaw = startNode.yaw;
-    else if (typeof s?.startYaw === 'number') yaw = s.startYaw;
-    else if (startNode) {
-      const conn = (mapData.connections ?? []).find((c: any) => c.fromNodeId === startId || c.toNodeId === startId);
-      const otherId = conn ? (conn.fromNodeId === startId ? conn.toNodeId : conn.fromNodeId) : null;
-      const other = otherId ? ns.find((n) => n.id === otherId) : null;
-      if (other) yaw = Math.atan2(-(other.position.x - startNode.position.x), -(other.position.z - startNode.position.z));
-    }
+    const { pos, yaw, startNode } = startPose(mapData, fs);
     fs.goInside(pos, yaw);
     fs.playIntro();
-    pushMsg('assistant', startNode
-      ? `You're at ${startNode.label}. Use the joystick or W A S D to walk, drag to look around — or tell me where to go.`
-      : "You're at the main entrance. Use the joystick or W A S D to walk, drag to look around.");
+    if (!initialDestination) {
+      pushMsg('assistant', startNode
+        ? `You're at ${startNode.label}. Use the joystick or W A S D to walk, drag to look around — or tell me where to go.`
+        : "You're at the main entrance. Use the joystick or W A S D to walk, drag to look around.");
+    }
     drawMinimap();
-  }, [sceneReady, mapData, pushMsg, drawMinimap]);
+  }, [sceneReady, mapData, pushMsg, drawMinimap, initialDestination]);
 
   /* ───────────── routing ───────────── */
   function clearRoute() {
+    routeSeqRef.current += 1;
+    legsRef.current = [];
+    stepsRef.current = [];
+    spokenLegRef.current = -1;
     fsRef.current?.stopGuide();
     routeRef.current?.dispose();
     routeRef.current = null;
@@ -318,11 +384,13 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     const startId = nearestNode(ns, { x: me.x, y: me.y, z: me.z }) ?? pickStartNode(ns);
     const path = startId ? findPath(ns, es, startId, dest.targetNodeId) : null;
     clearRoute();
+    const seq = routeSeqRef.current;
     if (!path?.length) { pushMsg('assistant', `No walking route is mapped to ${dest.name} yet.`); return; }
     if (path.length === 1) { pushMsg('assistant', `You are already at ${dest.name}.`); return; }
 
-    const pts: Array<{ x: number; y: number; z: number }> = path.map((id) => ns.find((n) => n.id === id)!.position);
-    if (Math.hypot(pts[0].x - me.x, pts[0].z - me.z) > 1.2) pts.unshift({ x: me.x, y: pts[0].y, z: me.z });
+    const stops: RouteStop[] = path.map((id) => { const n = ns.find((x) => x.id === id)!; return { label: n.label, position: n.position }; });
+    if (Math.hypot(stops[0].position.x - me.x, stops[0].position.z - me.z) > 1.2) stops.unshift({ label: '', position: { x: me.x, y: stops[0].position.y, z: me.z } });
+    const pts: Array<{ x: number; y: number; z: number }> = stops.map((st) => st.position);
     routePtsRef.current = pts;
 
     const route = buildRoute(fs.THREE, pts);
@@ -331,6 +399,7 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
 
     const { makePin } = await import('@/lib/three/pins');
     const destPin = await makePin(0xef4444, dest.name);
+    if (seq !== routeSeqRef.current) { destPin.removeFromParent?.(); return; }
     const last = pts[pts.length - 1];
     destPin.position.set(last.x, last.y, last.z);
     fs.scene.add(destPin);
@@ -341,13 +410,41 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
     setRouteLabel(dest.name);
     setStatus('routing');
     setPanel('none');
-    fs.setGuideSpeed(SPEEDS[speedIdx]);
-    fs.startGuide(route.curve, route.length, SPEEDS[speedIdx]);
-    pushMsg('assistant', `Walking you to ${dest.name}. Drag to look around — take the controls any time to pause.`);
     drawMinimap();
+
+    // The AI analyses the route (points, distances, pace) and writes what to say. When the visitor asked from
+    // the home screen this is already done (and the overview already spoken); otherwise it is done now, with the
+    // green line already visible, and the overview is spoken IN FULL before the walk begins.
+    const analysis = analyseStops(dest.name, stops, fs.getSettings().guideSpeed || 1.7);
+    let plan = analysis ? takePlan(dest.name, analysis.legs.length) : null;
+    if (analysis && !plan) {
+      plan = await requestGuidance(analysis, { userText: query, apiKey: (process.env.NEXT_PUBLIC_GROQ_API_KEY || '').trim() });
+      if (seq !== routeSeqRef.current) return;
+    }
+    if (analysis && plan) {
+      legsRef.current = analysis.legs;
+      stepsRef.current = plan.steps;
+      arrivalLineRef.current = plan.arrival;
+      routeLenRef.current = route.length;
+      briefRef.current = [plan.overview, ...plan.steps].join(' ');
+      pushMsg('assistant', plan.overview);
+      if (!plan.overviewSpoken) {
+        await say(plan.overview);
+        if (seq !== routeSeqRef.current) return;
+      }
+    } else {
+      arrivalLineRef.current = '';
+    }
+
+    spokenLegRef.current = -1;
+    paceRef.current = 1;
+    wasPausedRef.current = false;
+    userPausedRef.current = false;
+    fs.startGuide(route.curve, route.length, userMultRef.current);
   }
 
   function stopRoute(message = 'Navigation stopped. Where to next?') {
+    cancelSpeech();
     clearRoute();
     setStatus('idle');
     pushMsg('assistant', message);
@@ -364,7 +461,8 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
       return;
     }
     if (/^(stop|cancel|end)\b/i.test(q)) { stopRoute(); return; }
-    if (/^(pause|wait)\b/i.test(q)) { fsRef.current?.pauseGuide(); return; }
+    if (/^(pause|wait)\b/i.test(q)) { userPausedRef.current = true; fsRef.current?.pauseGuide(); return; }
+    if (/^(repeat|again|say that again|explain|how do i (follow|get|find))/i.test(q) && briefRef.current && routing) { void say(briefRef.current); return; }
     if (/^(resume|continue|go on)\b/i.test(q)) { fsRef.current?.resumeGuide(); return; }
     if (/where am i|my location/i.test(q) && mapData?.nodes?.length && fsRef.current) {
       const me = fsRef.current.getFpv();
@@ -383,7 +481,7 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
       onSend(initialDestination);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialDestination, mapData, sceneReady, prep.busy]);
+  }, [initialDestination, mapData, sceneReady]);
 
 
   const setMove = useCallback((fwd: number, strafe: number, run: boolean) => {
@@ -421,16 +519,14 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
         </div>
       )}
 
-      {/* preparing / loading overlay: never a black screen, always says what is happening */}
-      {!loadError && (!sceneReady || prep.busy) && (
+      {/* loading overlay: normally never seen, because the building is prepared when the app opens */}
+      {!loadError && (!sceneReady || loadStatus.phase === 'loading' || loadStatus.phase === 'preparing') && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4 bg-[#0b1220]/95">
           <div className="size-10 rounded-full border-4 border-blue-500/30 border-t-blue-400 animate-spin" />
-          <p className="text-sm font-semibold">{sceneReady ? 'Preparing the interior…' : 'Loading the building…'}</p>
-          {prep.busy && (
-            <div className="w-56 h-1.5 rounded-full bg-white/10 overflow-hidden">
-              <div className="h-full bg-blue-500 transition-all" style={{ width: `${Math.round(prep.p * 100)}%` }} />
-            </div>
-          )}
+          <p className="text-sm font-semibold">{loadStatus.phase === 'preparing' ? 'Preparing the interior…' : 'Loading the building…'}</p>
+          <div className="w-56 h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div className="h-full bg-blue-500 transition-all" style={{ width: `${Math.round(loadStatus.progress * 100)}%` }} />
+          </div>
         </div>
       )}
 
@@ -446,6 +542,15 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
             {shownStatus === 'idle' && 'Ground Floor'}
           </p>
         </div>
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-label={muted ? 'Turn voice guidance on' : 'Turn voice guidance off'}
+          aria-pressed={muted}
+          className="pointer-events-auto ml-auto mr-[140px] p-2 rounded-lg hover:bg-white/10"
+        >
+          {muted ? <VolumeX className="size-5 text-slate-400" /> : <Volume2 className="size-5" />}
+        </button>
       </header>
 
       {/* minimap */}
@@ -485,12 +590,12 @@ export default function Nav3DExperience({ initialDestination = '' }: { initialDe
               <Play className="size-3.5" /> Resume
             </button>
           ) : (
-            <button onClick={() => fsRef.current?.pauseGuide()} className="flex items-center gap-1.5 rounded-full bg-black/55 border border-white/20 hover:bg-black/70 px-3.5 py-2 text-xs font-bold backdrop-blur-sm">
+            <button onClick={() => { userPausedRef.current = true; fsRef.current?.pauseGuide(); }} className="flex items-center gap-1.5 rounded-full bg-black/55 border border-white/20 hover:bg-black/70 px-3.5 py-2 text-xs font-bold backdrop-blur-sm">
               <Pause className="size-3.5" /> Pause
             </button>
           )}
           <button
-            onClick={() => { const i = (speedIdx + 1) % SPEEDS.length; setSpeedIdx(i); fsRef.current?.setGuideSpeed(SPEEDS[i]); }}
+            onClick={() => { const i = (speedIdx + 1) % SPEEDS.length; setSpeedIdx(i); userMultRef.current = SPEEDS[i]; applyPace(); }}
             className="rounded-full bg-black/55 border border-white/20 hover:bg-black/70 px-3 py-2 text-xs font-bold backdrop-blur-sm"
             aria-label="Change walking speed"
           >

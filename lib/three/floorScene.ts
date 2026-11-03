@@ -87,7 +87,8 @@ const wrapPi = (a: number) => {
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 const materialsOf = (m: THREE.Mesh): THREE.Material[] => (Array.isArray(m.material) ? m.material : [m.material]);
 
-export async function createFloorScene(container: HTMLElement, modelUrl: string, opts: SceneOptions = {}) {
+export async function createFloorScene(initialContainer: HTMLElement, modelUrl: string, opts: SceneOptions = {}) {
+  let container = initialContainer;
   const role: SceneRole = opts.role ?? 'admin';
   const visitor = role === 'visitor';
   const settings: MoveSettings = { ...DEFAULT_MOVE_SETTINGS, ...(opts.settings ?? {}) };
@@ -227,6 +228,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     t: 0,
     active: false,
     paused: false,
+    hold: false,
     mult: 1,
     lastCue: 'straight' as Cue,
   };
@@ -262,7 +264,9 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
 
   const stepGuide = (dt: number) => {
     if (!guide.curve) return;
-    guide.t = Math.min(1, guide.t + (dt * settings.guideSpeed * guide.mult) / Math.max(guide.length, 0.01));
+    // `hold` = wait here (used so the voice can finish its sentence before the next stretch of the line)
+    const rate = guide.hold ? 0 : settings.guideSpeed * guide.mult;
+    guide.t = Math.min(1, guide.t + (dt * rate) / Math.max(guide.length, 0.01));
     const p = guide.curve.getPointAt(guide.t);
     const k = 1 - Math.exp(-7 * dt);
     fpv.pos.x += (p.x - fpv.pos.x) * k;
@@ -278,7 +282,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
       fpv.yawT = fpv.yaw + wrapPi(want + fpv.lookOff - fpv.yaw);
     }
     fpv.pitchT = clamp(fpv.pitchT * Math.exp(-1.5 * dt), -0.6, 0.6);
-    fpv.vel.set(-Math.sin(fpv.yaw) * settings.guideSpeed * guide.mult, 0, -Math.cos(fpv.yaw) * settings.guideSpeed * guide.mult);
+    fpv.vel.set(-Math.sin(fpv.yaw) * rate, 0, -Math.cos(fpv.yaw) * rate);
     if (guide.t >= 1) {
       guide.active = false;
       fpv.vel.set(0, 0, 0);
@@ -641,7 +645,14 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
   let animationFrame = 0;
   let previousTime = 0;
   let emitAcc = 0;
+  let paused = false;
   const animate = (time: number) => {
+    if (paused) {
+      // nobody is looking at the scene (e.g. the visitor is on the voice screen): do no work at all
+      previousTime = 0;
+      animationFrame = window.requestAnimationFrame(animate);
+      return;
+    }
     const deltaTime = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
     previousTime = time;
     if (viewMode === 'inside') {
@@ -842,6 +853,28 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     renderer,
     role,
     applyOverrides,
+
+    /** Move the canvas into another element (the scene is built once at app start and re-used by every page). */
+    attach(next: HTMLElement) {
+      container = next;
+      next.appendChild(renderer.domElement);
+      resizeObserver.disconnect();
+      resizeObserver.observe(next);
+      resize();
+      paused = false;
+    },
+    /** Stop rendering while no page is showing the scene. The scene itself stays loaded in memory. */
+    detach(park: HTMLElement) {
+      paused = true;
+      keys.clear();
+      input.fwd = 0; input.strafe = 0; input.turn = 0; input.run = false;
+      resizeObserver.disconnect();
+      container = park;
+      park.appendChild(renderer.domElement);
+    },
+    /** Draw one frame immediately (used right after the initial build so shaders are compiled before first view). */
+    renderNow() { renderer.render(scene, activeCamera()); },
+    compileShaders() { renderer.compile(scene, camera); },
     setCamera,
     setViewMode,
     getViewMode: () => viewMode,
@@ -882,7 +915,7 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
     startGuide(curve: THREE.Curve<THREE.Vector3>, length: number, speedMult = 1) {
       if (viewMode !== 'inside') setViewMode('inside');
       guide.curve = curve; guide.length = Math.max(length, 0.01); guide.t = 0;
-      guide.active = true; guide.paused = false; guide.mult = speedMult;
+      guide.active = true; guide.paused = false; guide.hold = false; guide.mult = speedMult;
       fpv.lookOff = 0;
       const p = curve.getPointAt(0);
       if (Math.hypot(p.x - fpv.pos.x, p.z - fpv.pos.z) > 4) { fpv.pos.set(p.x, p.y - 0.12, p.z); }
@@ -900,8 +933,9 @@ export async function createFloorScene(container: HTMLElement, modelUrl: string,
       }
       guide.t = best; guide.active = true; guide.paused = false;
     },
-    stopGuide() { guide.active = false; guide.paused = false; guide.curve = null; fpv.lookOff = 0; },
-    setGuideSpeed(mult: number) { guide.mult = clamp(mult, 0.4, 3); },
+    setGuideHold(h: boolean) { guide.hold = h; },
+    stopGuide() { guide.active = false; guide.paused = false; guide.hold = false; guide.curve = null; fpv.lookOff = 0; },
+    setGuideSpeed(mult: number) { guide.mult = clamp(mult, 0.3, 3); },
     onArrive(cb: () => void) { arriveCallbacks.add(cb); return () => { arriveCallbacks.delete(cb); }; },
     onUpdate(cb: (p: PoseUpdate) => void) { updateCallbacks.add(cb); return () => { updateCallbacks.delete(cb); }; },
 
