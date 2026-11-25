@@ -7,6 +7,7 @@ import { api } from '@/convex/_generated/api';
 import { Mic, MicOff, MapPin, Landmark, Volume2, ArrowRight, MessageSquare, Navigation, Bot, User, Compass, Sparkles } from 'lucide-react';
 import VoicePanel from '@/components/VoicePanel';
 import type { BuildingContext } from '@/components/types';
+import { analyseRouteFromMap, requestGuidance, savePlan } from '@/lib/wayfinding/plan';
 
 // ─── Types ───
 type AgentState = 'offline' | 'listening' | 'thinking' | 'speaking' | 'navigating';
@@ -81,6 +82,8 @@ export default function ConversationalWayfindingUI() {
 
   // Data queries
   const buildingContext = useQuery(api.routes.getBuildingContext) as BuildingContext | undefined;
+  // already cached: the preloader subscribed to it when the app opened
+  const publishedMap = useQuery(api.mapAdmin.getPublishedMap);
   const liveConvexRoute = useQuery(api.routes.getWayfindingSequence, {
     transcriptInput: voiceIntentQuery
   });
@@ -108,6 +111,8 @@ export default function ConversationalWayfindingUI() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { isStreamingRef.current = isStreaming; }, [isStreaming]);
+  // Fetch the directions screen's code up front, so jumping to it later is instant.
+  useEffect(() => { router.prefetch('/directions'); }, [router]);
   useEffect(() => {
     if (chatScrollRef.current) chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
   }, [chatMessages]);
@@ -471,12 +476,29 @@ RESPOND ONLY IN THIS JSON FORMAT:
         setAgentState('navigating');
         setIsThinking(false);
         
-        await new Promise((resolve) => setTimeout(resolve, 600));
-        await speakText(groqResult.response);
+        // 1) The AI analyses the route (points, distances, pace) and writes the briefing while the quick
+        //    confirmation is being spoken, so there is no dead air between the two.
+        const analysis = publishedMap ? analyseRouteFromMap(publishedMap, destinationName) : null;
+        const planPromise = analysis
+          ? requestGuidance(analysis, { userText: cleanText, apiKey: getGroqApiKey() })
+          : Promise.resolve(null);
 
+        // 2) Speak the confirmation, then the briefing — each one finishes completely before the next starts.
+        await speakText(groqResult.response);
+        const plan = await planPromise;
+        if (plan) {
+          setChatMessages(prev => [...prev, { role: 'assistant', content: plan.overview, timestamp: getCurrentTimestamp() }]);
+          setCurrentSystemMessage(plan.overview);
+          setAgentState('navigating');
+          await speakText(plan.overview);
+          // hand the per-leg lines to the 3D view so it can say them while the visitor walks each stretch
+          savePlan({ ...plan, overviewSpoken: true });
+        }
+
+        // 3) Only now launch the 3D view (already loaded in the background).
         stopWebRtcStreamRef.current();
         router.push(`/directions?destination=${encodeURIComponent(destinationName)}`);
-        
+
       } else {
         setSpokenDestinationName("");
         setAppMode('chat');
