@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🧭 Navi
+# 🧭 NaviSense
 
-### Voice-guided 3D indoor navigation
+### Intelligent indoor wayfinding for the MUBAS ODeL Building
 
 **📖 Installation Guide**
 
@@ -17,22 +17,23 @@
 
 <br>
 
-[✨ Features](#-features) · [📋 Requirements](#-requirements) · [🚀 Installation](#-installation) · [🗺️ First Map](#️-build-your-first-map) · [☁️ Deploy](#️-deployment) · [🛠️ Troubleshooting](#️-troubleshooting)
+[✨ About](#-about) · [📋 Requirements](#-requirements) · [🚀 Installation](#-installation) · [🗺️ First Map](#️-build-and-publish-the-map) · [🖥️ Kiosk Setup](#️-kiosk-setup) · [☁️ Deploy](#️-deployment) · [🛠️ Troubleshooting](#️-troubleshooting)
 
 </div>
 
 ---
 
-## ✨ Features
+## ✨ About
 
-| 🎙️ Voice assistant | 🏢 3D walk-through | 🛠️ Admin studio |
+NaviSense is a **kiosk-based** navigation prototype. Visitors speak or type where they want to go, and the kiosk previews the route in a 3D model of the building, with spoken, landmark-based directions, before they start walking.
+
+| 🎙️ Ask | 🧠 Understand | 🏢 Show |
 | :--- | :--- | :--- |
-| Speak or type *"Take me to the Conference hall"* and get spoken directions. | Follow the route inside a 3D model of the building, with spoken directions. | **ODeL NavAdmin**: build floors, nodes, rooms and viewpoints, then publish. |
+| Speak or type a request, e.g. *"Take me to the Conference hall"*. | Deepgram transcribes speech and a Groq language model finds the destination. | Dijkstra's algorithm finds the shortest route, shown as a guided 3D walk. |
 
-- 📱 **Visitor app**: public wayfinding on phones, tablets and kiosks
-- 🔐 **Admin app**: protected, with roles (`admin`, `editor`, `viewer`) and an audit log
-- 📷 **QR continue**: scan QR markers in the building to resume a route
-- 🏛️ **Sample model** included: `public/floor/ODeL_Building.glb`
+- 🏛️ **Coverage:** the ground floor of the ODeL Building (`public/floor/ODeL_Building.glb`)
+- 🔐 **Admin studio (ODeL NavAdmin):** build and publish the map from a protected area
+- 🛡️ **Privacy:** no visitor requests or personal data are stored
 
 ---
 
@@ -42,16 +43,17 @@
 
 - 🟢 **Node.js 20.9+** and npm (check with `node -v`)
 - 🔀 **Git** (only if you clone the repository)
-- 🌐 A modern browser with **WebGL** (Chrome or Edge recommended). Microphone for voice, camera for the QR page.
+- 🌐 A modern browser with **WebGL** (Chrome, Edge or Brave). Microphone for voice requests.
+- 📶 An **internet connection** (speech and language services run in the cloud)
 
 **Accounts and API keys**
 
 | Service | Used for | Required |
 | :--- | :--- | :---: |
-| 🟠 [**Convex**](https://convex.dev) | Database, backend, sessions, storage | ✅ |
-| 🟣 [**Groq**](https://groq.com) | AI that understands requests and rewrites directions | ✅ |
-| 🔵 [**Deepgram**](https://deepgram.com) | Speech-to-text | ✅ |
-| 🟡 [**ElevenLabs**](https://elevenlabs.io) | Natural Malawian-accent voice (API key + Voice ID) | ➖ optional |
+| 🟠 [**Convex**](https://convex.dev) | Database, server functions, admin login, file storage | ✅ |
+| 🟣 [**Groq**](https://groq.com) | Understands requests and writes the route briefing | ✅ |
+| 🔵 [**Deepgram**](https://deepgram.com) | Speech-to-text and spoken directions | ✅ |
+| 🟡 [**ElevenLabs**](https://elevenlabs.io) | Alternative natural voice (API key + Voice ID) | ➖ optional |
 
 ---
 
@@ -71,32 +73,32 @@ npm install
 npx convex dev
 ```
 
-Log in when the browser opens and create a new project. Convex uploads the functions in `convex/` and writes `NEXT_PUBLIC_CONVEX_URL` to `.env.local`.
+Log in when the browser opens and create a new project. Convex uploads the functions in `convex/`, creates the database tables and writes your deployment details to `.env.local`.
 
 > [!TIP]
 > Leave this terminal running and open a second one for the next steps.
 
 ### 3️⃣ Configure environment variables
 
-Create a file named `.env.local` in the project root with **all** of the following:
+Create or edit `.env.local` in the project root so it contains **all** of the following:
 
 ```env
 # ── Convex (added automatically by `npx convex dev`) ──
 CONVEX_DEPLOYMENT=dev:your-deployment-name
 NEXT_PUBLIC_CONVEX_URL=https://your-deployment.convex.cloud
 
-# ── AI language model (Groq) ──
+# ── Request interpretation and route briefing (Groq) ──
 NEXT_PUBLIC_GROQ_API_KEY=your_groq_key
 
-# ── Speech-to-text (Deepgram) ──
+# ── Speech-to-text and spoken directions (Deepgram) ──
 NEXT_PUBLIC_DEEPGRAM_API_KEY=your_deepgram_key
 
-# ── Natural voice (ElevenLabs, optional) ──
+# ── Alternative natural voice (ElevenLabs, optional) ──
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_ID=your_voice_id
 ```
 
-Then set the **admin account** variables in Convex (these go in Convex, *not* in `.env.local`):
+Then set the **administrator account** in Convex (these go in Convex, *not* in `.env.local`):
 
 ```bash
 npx convex env set ADMIN_EMAIL "you@example.com"
@@ -140,42 +142,76 @@ npm run dev
 ```
 
 > [!NOTE]
-> `npm run dev:all` starts Convex and the web app together, and makes the app reachable from other devices on your network, which is handy for testing on a phone.
+> `npm run dev:all` starts Convex and the web app together and makes the app reachable from other devices on your network, which is handy for testing on a kiosk screen or tablet.
 
 | 🔗 Address | 📄 Page |
 | :--- | :--- |
-| http://localhost:3000 | 🎙️ Visitor app |
-| http://localhost:3000/admin/login | 🔐 Admin sign-in |
-| http://localhost:3000/admin | 📊 Admin dashboard |
-| http://localhost:3000/directions | 🏢 3D walk-through |
-| http://localhost:3000/continue | 📷 QR scanner |
+| http://localhost:3000 | 🎙️ Kiosk home screen (voice orb and text box) |
+| http://localhost:3000/directions | 🏢 3D route guidance |
+| http://localhost:3000/admin/login | 🔐 Administrator sign-in |
+| http://localhost:3000/admin | 📊 Administrator dashboard |
 
 ---
 
-## 🗺️ Build Your First Map
+## 🗺️ Build and Publish the Map
 
 > [!WARNING]
-> A new database is empty. Visitors will see no destinations until a map is **published**.
+> A new database is empty. Visitors will find no destinations until a map is built and **published**.
 
-1. 🔑 Sign in at `/admin/login` with `ADMIN_EMAIL` and `ADMIN_PASSWORD` (sessions last 24 hours).
-2. 🏁 Open **Building Maps**, pick the building and floor, and add a **Main Entrance** node. Every route starts here.
-3. 📍 Place nodes along corridors, junctions, stairs and doors. Connect neighbours so everything forms **one network**.
-4. 🚪 Add **rooms** (with optional aliases) so visitors can ask for them by name.
-5. ✅ Test a route and make every item on the **Dashboard** health checklist green.
-6. 🚀 Click **Publish**. The map is now live in the visitor app.
+1. 🔑 Sign in at `/admin/login` with `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Sessions last 24 hours.
+2. 🏢 Open **Building Maps**. The editor loads the same 3D model the visitors see.
+3. 🏁 Use **Add Node** to create a node named **Main Entrance**. Routes from the kiosk home screen start here. If it is missing, the system falls back to an entrance, reception or lobby node.
+4. 📍 Use **Add Node** to click points along corridors, junctions, stairs and doors. Mark landmarks (corridor, staircase, elevator, double door), because spoken directions are built from them.
+5. 🚪 Use **Add Room** to click inside a room and name it. This creates the node and the searchable destination together, with a simple alias made from the name.
+6. 🔗 Use **Connect Nodes**: click one node, then another. Every node must join **one connected network**.
+7. 🎯 Use **Select** to fix a node's name, type or connections. Move a node with the translate gizmo and set the direction a visitor faces with the rotate gizmo. Both save when released.
+8. ✅ Open the **Dashboard** and make every map-health item green.
+9. 🚀 Click **Publish**. Visitors always use the saved map, so changes apply to the next request without redeploying.
 
-👥 Need more users? Open **Manage Settings** to add admins, editors and viewers.
+**Admin pages:** Dashboard · Building Maps · Destinations · Routes · Analytics (audit log).
+
+**Roles:** `admin` and `editor` can change the map. Creating users and changing assistant settings (name, personality, colours) is **admin-only**.
+
+---
+
+## 🖥️ Kiosk Setup
+
+NaviSense guides from a **fixed kiosk position**, so the kiosk should stand where the Main Entrance node is placed on the map.
+
+1. 🖱️ Use a touchscreen or a computer with a microphone, connected to the internet.
+2. 🌐 Open the app address in Chrome, Edge or Brave and switch the browser to **full screen** (`F11`).
+3. 🎤 Allow **microphone access** when the browser asks.
+4. 🔊 Check the speakers work, then test with a request such as *"Take me to the Conference hall"*.
+5. 🔒 Keep the kiosk on the visitor pages only. The administrator pages need a sign-in.
+
+**How visitors use it**
+
+- Tap the **voice orb** and speak, or type in the text box. Typing always works as an alternative to speaking.
+- The orb shows when the kiosk is *listening*, *thinking* or *speaking*.
+- The 3D walk follows a green line to a red destination pin, with spoken directions and an on-screen turn cue.
+- **Controls:** pause, resume, speed (0.7×, 1×, 1.5×, 2×), mute, list of places, and a joystick (touch) or `W` `A` `S` `D` keys (computer) to look around freely.
+- **Typed commands:** *stop*, *pause*, *resume*, *repeat* and *where am I*.
 
 ---
 
 ## ☁️ Deployment
 
-1. **Backend**: run `npx convex deploy`. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` on production, then:
+1. **Backend:** run `npx convex deploy`. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` on the production deployment, then:
    ```bash
    npx convex run seed:seedAdmin --prod
    ```
-2. **Web app**: deploy to [Vercel](https://vercel.com) (or `npm run build` then `npm run start`) with the same environment variables, using the **production** `NEXT_PUBLIC_CONVEX_URL`.
-3. **HTTPS**: always serve over HTTPS. Browsers allow microphone and camera only on HTTPS or localhost.
+2. **Web app:** deploy to [Vercel](https://vercel.com) (or `npm run build` then `npm run start`) with the same environment variables, using the **production** `NEXT_PUBLIC_CONVEX_URL`.
+3. **HTTPS:** always serve over HTTPS. Browsers allow the microphone only on HTTPS or localhost.
+4. **Publish the map** on the production deployment, since it has its own database.
+
+---
+
+## ⚠️ Good to Know
+
+- 🏢 The prototype covers the **ground floor** only.
+- 📍 It does **not track visitors**. Guidance is a virtual walk that starts at the main entrance or the nearest node.
+- 📶 Speech recognition, request interpretation and the Deepgram voice need internet. If they fail, **typed input**, the local route briefing and the browser voice keep guidance available.
+- 🛠️ Nodes, connections and rooms must be kept in step with the building by an administrator through the map editor.
 
 ---
 
@@ -194,21 +230,27 @@ Set a 16+ character `ADMIN_PASSWORD` in the **same** Convex deployment, and use 
 </details>
 
 <details>
-<summary><b>🗺️ No destinations, or "No route" in the editor</b></summary>
+<summary><b>🗺️ No destinations, or "no walking route is mapped yet"</b></summary>
 
-Add rooms and click **Publish**. Connect any disconnected nodes and make sure a **Main Entrance** exists (the Dashboard shows what is missing).
+Add rooms and click **Publish**. Connect any disconnected nodes and make sure a **Main Entrance** node exists. The Dashboard shows what is missing.
 </details>
 
 <details>
-<summary><b>🎙️ Microphone or AI not working</b></summary>
+<summary><b>🎙️ Microphone does not work</b></summary>
 
-Allow microphone access, use HTTPS or localhost, and check the Deepgram and Groq keys in `.env.local`. Restart the app after editing it.
+Allow microphone access, use HTTPS or localhost, and check the Deepgram key in `.env.local`. Restart the app after editing it. You can still type requests.
 </details>
 
 <details>
-<summary><b>🔈 "Malawian voice is not configured"</b></summary>
+<summary><b>🤖 The assistant does not understand requests</b></summary>
 
-Set both ElevenLabs variables and restart. This feature is optional.
+Check the Groq key in `.env.local` and the internet connection. Make sure rooms are published, because the assistant matches requests against the published destinations and their aliases.
+</details>
+
+<details>
+<summary><b>🔈 No spoken directions</b></summary>
+
+Check the Deepgram key and that the mute button is off. If the cloud voice fails, the browser voice is used instead.
 </details>
 
 <details>
@@ -223,7 +265,7 @@ Enable WebGL / hardware acceleration. Update Node.js to 20.9+ and reinstall. Use
 
 - 🤫 Keep `ADMIN_PASSWORD` secret. After first sign-in, create a personal admin and optionally remove the seeded one.
 - 🚫 Never commit `.env.local` or share your API keys.
-- 📜 Review the audit log in **Manage Settings** regularly.
+- 📜 Administrator actions are recorded in the audit log. Visitor activity is not.
 
 ---
 
@@ -241,6 +283,6 @@ Enable WebGL / hardware acceleration. Update Node.js to 20.9+ and reinstall. Use
 
 <br>
 
-**Made with 💙 for easier indoor wayfinding**
+**NaviSense · School of Science and Technology · MUBAS**
 
 </div>
