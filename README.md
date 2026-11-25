@@ -4,7 +4,7 @@
 
 ### Voice-guided 3D indoor navigation
 
-*Say where you want to go. Navi walks you there.*
+**📖 Installation Guide**
 
 <br>
 
@@ -27,7 +27,7 @@
 
 | 🎙️ Voice assistant | 🏢 3D walk-through | 🛠️ Admin studio |
 | :--- | :--- | :--- |
-| Speak or type *"Take me to the Conference hall"*. Works in **English** and **Chichewa**. | Follow the route inside a 3D model of the building, with spoken directions. | **ODeL NavAdmin**: build floors, nodes, rooms and viewpoints, then publish. |
+| Speak or type *"Take me to the Conference hall"* and get spoken directions. | Follow the route inside a 3D model of the building, with spoken directions. | **ODeL NavAdmin**: build floors, nodes, rooms and viewpoints, then publish. |
 
 - 📱 **Visitor app**: public wayfinding on phones, tablets and kiosks
 - 🔐 **Admin app**: protected, with roles (`admin`, `editor`, `viewer`) and an audit log
@@ -78,29 +78,43 @@ Log in when the browser opens and create a new project. Convex uploads the funct
 
 ### 3️⃣ Configure environment variables
 
-**🌐 Web app**: add to `.env.local` in the project root:
+Create a file named `.env.local` in the project root with **all** of the following:
 
 ```env
+# ── Convex (added automatically by `npx convex dev`) ──
+CONVEX_DEPLOYMENT=dev:your-deployment-name
 NEXT_PUBLIC_CONVEX_URL=https://your-deployment.convex.cloud
+
+# ── AI language model (Groq) ──
 NEXT_PUBLIC_GROQ_API_KEY=your_groq_key
+
+# ── Speech-to-text (Deepgram) ──
 NEXT_PUBLIC_DEEPGRAM_API_KEY=your_deepgram_key
 
-# Optional: natural voice
+# ── Natural voice (ElevenLabs, optional) ──
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_ID=your_voice_id
 ```
 
-**⚙️ Backend (Convex)**: set these in Convex, *not* in `.env.local`:
+Then set the **admin account** variables in Convex (these go in Convex, *not* in `.env.local`):
 
 ```bash
 npx convex env set ADMIN_EMAIL "you@example.com"
 npx convex env set ADMIN_PASSWORD "a-long-one-time-password-16+"
 ```
 
-| Variable | Notes |
-| :--- | :--- |
-| `ADMIN_EMAIL` | Optional. Defaults to `admin@navi.local` |
-| `ADMIN_PASSWORD` | **Required**, at least 16 characters |
+**Complete list of environment variables**
+
+| Variable | Where | Required | Description |
+| :--- | :--- | :---: | :--- |
+| `CONVEX_DEPLOYMENT` | `.env.local` | ✅ | Your Convex deployment (written by `npx convex dev`) |
+| `NEXT_PUBLIC_CONVEX_URL` | `.env.local` | ✅ | Your Convex deployment URL |
+| `NEXT_PUBLIC_GROQ_API_KEY` | `.env.local` | ✅ | Groq API key |
+| `NEXT_PUBLIC_DEEPGRAM_API_KEY` | `.env.local` | ✅ | Deepgram API key |
+| `ELEVENLABS_API_KEY` | `.env.local` | ➖ | ElevenLabs API key |
+| `ELEVENLABS_VOICE_ID` | `.env.local` | ➖ | ElevenLabs voice ID |
+| `ADMIN_EMAIL` | Convex | ➖ | Admin email. Defaults to `admin@navi.local` |
+| `ADMIN_PASSWORD` | Convex | ✅ | One-time admin password, at least 16 characters |
 
 > [!IMPORTANT]
 > Restart the web app after changing `.env.local`. Never commit this file to Git.
@@ -168,7 +182,7 @@ npm run dev
 ## 🛠️ Troubleshooting
 
 <details>
-<summary><b>⚠️ "NEXT_PUBLIC_CONVEX_URL is not set" or the page is stuck on Loading</b></summary>
+<summary><b>⚠️ "Convex URL is not set" or the page is stuck on Loading</b></summary>
 
 Run `npx convex dev` and keep it running, then restart `npm run dev`.
 </details>
@@ -188,7 +202,7 @@ Add rooms and click **Publish**. Connect any disconnected nodes and make sure a 
 <details>
 <summary><b>🎙️ Microphone or AI not working</b></summary>
 
-Allow microphone access, use HTTPS or localhost, and check `NEXT_PUBLIC_DEEPGRAM_API_KEY` and `NEXT_PUBLIC_GROQ_API_KEY`. Without Groq, original direction text is used.
+Allow microphone access, use HTTPS or localhost, and check the Deepgram and Groq keys in `.env.local`. Restart the app after editing it.
 </details>
 
 <details>
@@ -207,11 +221,8 @@ Enable WebGL / hardware acceleration. Update Node.js to 20.9+ and reinstall. Use
 
 ## 🔒 Security Notes
 
-> [!CAUTION]
-> Variables starting with `NEXT_PUBLIC_` (including the Groq and Deepgram keys) are visible to anyone who opens the app. Use usage-limited keys and rotate them if they leak.
-
 - 🤫 Keep `ADMIN_PASSWORD` secret. After first sign-in, create a personal admin and optionally remove the seeded one.
-- 🚫 Never commit `.env.local`.
+- 🚫 Never commit `.env.local` or share your API keys.
 - 📜 Review the audit log in **Manage Settings** regularly.
 
 ---
