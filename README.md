@@ -1,28 +1,63 @@
-# Navi – Voice-guided 3D Indoor Navigation
+<div align="center">
 
-Navi guides visitors through a building. A visitor speaks or types where they want to go (e.g. "Take me to the Conference hall") and Navi shows the route as a 3D walk-through with spoken directions, in English or Chichewa.
+# 🧭 Navi
 
-The project has two parts:
+### Voice-guided 3D indoor navigation
 
-- **Visitor app** – public voice and 3D wayfinding interface.
-- **Admin app (ODeL NavAdmin)** – protected area where administrators build the map (floors, nodes, connections, rooms, viewpoints) and publish it.
+*Say where you want to go. Navi walks you there.*
 
-Built with Next.js 16, React 19, Three.js and [Convex](https://convex.dev). A sample building model is included at `public/floor/ODeL_Building.glb`.
+<br>
 
-## Requirements
+![Next.js](https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)
+![Three.js](https://img.shields.io/badge/Three.js-3D-049EF4?style=for-the-badge&logo=threedotjs&logoColor=white)
+![Convex](https://img.shields.io/badge/Convex-Backend-F3694C?style=for-the-badge)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+![Tailwind](https://img.shields.io/badge/Tailwind-4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white)
 
-- Node.js 20.9 or newer (`node -v`) and npm
-- Git (only if you clone the repository)
-- A modern browser with WebGL (Chrome or Edge recommended); microphone for voice, camera for the QR page
-- Accounts / API keys:
-  - **Convex** (convex.dev) – free account, database and backend
-  - **Groq** (groq.com) – API key, language model
-  - **Deepgram** (deepgram.com) – API key, speech-to-text
-  - **ElevenLabs** (elevenlabs.io) – *optional*, API key and Voice ID for a Malawian-accent voice
+<br>
 
-## Installation
+[✨ Features](#-features) · [📋 Requirements](#-requirements) · [🚀 Installation](#-installation) · [🗺️ First Map](#️-build-your-first-map) · [☁️ Deploy](#️-deployment) · [🛠️ Troubleshooting](#️-troubleshooting)
 
-### 1. Get the code and install dependencies
+</div>
+
+---
+
+## ✨ Features
+
+| 🎙️ Voice assistant | 🏢 3D walk-through | 🛠️ Admin studio |
+| :--- | :--- | :--- |
+| Speak or type *"Take me to the Conference hall"*. Works in **English** and **Chichewa**. | Follow the route inside a 3D model of the building, with spoken directions. | **ODeL NavAdmin**: build floors, nodes, rooms and viewpoints, then publish. |
+
+- 📱 **Visitor app**: public wayfinding on phones, tablets and kiosks
+- 🔐 **Admin app**: protected, with roles (`admin`, `editor`, `viewer`) and an audit log
+- 📷 **QR continue**: scan QR markers in the building to resume a route
+- 🏛️ **Sample model** included: `public/floor/ODeL_Building.glb`
+
+---
+
+## 📋 Requirements
+
+**On your computer**
+
+- 🟢 **Node.js 20.9+** and npm (check with `node -v`)
+- 🔀 **Git** (only if you clone the repository)
+- 🌐 A modern browser with **WebGL** (Chrome or Edge recommended). Microphone for voice, camera for the QR page.
+
+**Accounts and API keys**
+
+| Service | Used for | Required |
+| :--- | :--- | :---: |
+| 🟠 [**Convex**](https://convex.dev) | Database, backend, sessions, storage | ✅ |
+| 🟣 [**Groq**](https://groq.com) | AI that understands requests and rewrites directions | ✅ |
+| 🔵 [**Deepgram**](https://deepgram.com) | Speech-to-text | ✅ |
+| 🟡 [**ElevenLabs**](https://elevenlabs.io) | Natural Malawian-accent voice (API key + Voice ID) | ➖ optional |
+
+---
+
+## 🚀 Installation
+
+### 1️⃣ Get the code
 
 ```bash
 git clone https://github.com/indoor-navi/navi.git
@@ -30,106 +65,171 @@ cd navi
 npm install
 ```
 
-### 2. Create the Convex backend
+### 2️⃣ Create the Convex backend
 
 ```bash
 npx convex dev
 ```
 
-Log in when the browser opens and create a new project. Convex uploads the functions in `convex/` and writes `NEXT_PUBLIC_CONVEX_URL` to `.env.local`. Leave this terminal running and open a second one.
+Log in when the browser opens and create a new project. Convex uploads the functions in `convex/` and writes `NEXT_PUBLIC_CONVEX_URL` to `.env.local`.
 
-### 3. Configure environment variables
+> [!TIP]
+> Leave this terminal running and open a second one for the next steps.
 
-**Web app** – add to `.env.local` in the project root (restart the app after any change):
+### 3️⃣ Configure environment variables
+
+**🌐 Web app**: add to `.env.local` in the project root:
 
 ```env
 NEXT_PUBLIC_CONVEX_URL=https://your-deployment.convex.cloud
 NEXT_PUBLIC_GROQ_API_KEY=your_groq_key
 NEXT_PUBLIC_DEEPGRAM_API_KEY=your_deepgram_key
 
-# Optional – natural voice
+# Optional: natural voice
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_ID=your_voice_id
 ```
 
-**Backend (Convex)** – set these in Convex, *not* in `.env.local`:
+**⚙️ Backend (Convex)**: set these in Convex, *not* in `.env.local`:
 
 ```bash
 npx convex env set ADMIN_EMAIL "you@example.com"
 npx convex env set ADMIN_PASSWORD "a-long-one-time-password-16+"
 ```
 
-- `ADMIN_EMAIL` is optional (default: `admin@navi.local`).
-- `ADMIN_PASSWORD` is required and must be at least 16 characters.
+| Variable | Notes |
+| :--- | :--- |
+| `ADMIN_EMAIL` | Optional. Defaults to `admin@navi.local` |
+| `ADMIN_PASSWORD` | **Required**, at least 16 characters |
 
-### 4. Create the first administrator
+> [!IMPORTANT]
+> Restart the web app after changing `.env.local`. Never commit this file to Git.
+
+### 4️⃣ Create the first administrator
 
 ```bash
 npx convex run seed:seedAdmin
 ```
 
-`created: true` means success; `created: false` means an administrator already exists. To change the seeded password later, update `ADMIN_PASSWORD` and run:
+`created: true` means success. `created: false` means an administrator already exists.
+
+To change the seeded password later, update `ADMIN_PASSWORD`, then run:
 
 ```bash
 npx convex run seed:rotateSeededAdminPassword
 ```
 
-### 5. Start the app
+### 5️⃣ Start the app
 
 ```bash
 npm run dev
 ```
 
-Or run `npm run dev:all` to start Convex and the web app together (also reachable from other devices on your network).
+> [!NOTE]
+> `npm run dev:all` starts Convex and the web app together, and makes the app reachable from other devices on your network, which is handy for testing on a phone.
 
-| Address | Page |
-| --- | --- |
-| http://localhost:3000 | Visitor app |
-| http://localhost:3000/admin/login | Admin sign-in |
-| http://localhost:3000/admin | Admin dashboard |
-| http://localhost:3000/directions | 3D walk-through |
-| http://localhost:3000/continue | QR-code scanner |
+| 🔗 Address | 📄 Page |
+| :--- | :--- |
+| http://localhost:3000 | 🎙️ Visitor app |
+| http://localhost:3000/admin/login | 🔐 Admin sign-in |
+| http://localhost:3000/admin | 📊 Admin dashboard |
+| http://localhost:3000/directions | 🏢 3D walk-through |
+| http://localhost:3000/continue | 📷 QR scanner |
 
-## Build and publish your first map
+---
 
-A new database is empty, so visitors see no destinations until a map is published.
+## 🗺️ Build Your First Map
 
-1. Sign in at `/admin/login` with `ADMIN_EMAIL` and `ADMIN_PASSWORD` (sessions last 24 hours).
-2. Open **Building Maps**, choose the building and floor, and add a **Main Entrance** node. Every route starts there.
-3. Place nodes along corridors, junctions, stairs and doors, and connect neighbours so all nodes form one network.
-4. Add rooms (with optional aliases) so visitors can ask for them by name.
-5. Test a route, make every item on the **Dashboard** health checklist green, then click **Publish**.
+> [!WARNING]
+> A new database is empty. Visitors will see no destinations until a map is **published**.
 
-Extra users (admin, editor, viewer) can be added under **Manage Settings**.
+1. 🔑 Sign in at `/admin/login` with `ADMIN_EMAIL` and `ADMIN_PASSWORD` (sessions last 24 hours).
+2. 🏁 Open **Building Maps**, pick the building and floor, and add a **Main Entrance** node. Every route starts here.
+3. 📍 Place nodes along corridors, junctions, stairs and doors. Connect neighbours so everything forms **one network**.
+4. 🚪 Add **rooms** (with optional aliases) so visitors can ask for them by name.
+5. ✅ Test a route and make every item on the **Dashboard** health checklist green.
+6. 🚀 Click **Publish**. The map is now live in the visitor app.
 
-## Deployment
+👥 Need more users? Open **Manage Settings** to add admins, editors and viewers.
 
-1. Deploy the backend: `npx convex deploy`. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` on the production deployment, then run `npx convex run seed:seedAdmin --prod`.
-2. Deploy the web app to Vercel (or run `npm run build` and `npm run start`) with the same environment variables, using the production `NEXT_PUBLIC_CONVEX_URL`.
-3. Serve over **HTTPS** – browsers only allow microphone and camera access on HTTPS or localhost.
+---
 
-## Troubleshooting
+## ☁️ Deployment
 
-| Problem | Fix |
-| --- | --- |
-| "NEXT_PUBLIC_CONVEX_URL is not set" or page stuck on Loading | Run `npx convex dev` (keep it running) and restart `npm run dev`. |
-| `seedAdmin` says "Set ADMIN_PASSWORD…" or cannot sign in | Set a 16+ character `ADMIN_PASSWORD` in the same Convex deployment; use the exact `ADMIN_EMAIL`; run `rotateSeededAdminPassword` if forgotten. |
-| No destinations, or "No route" in the editor | Add rooms and Publish; connect disconnected nodes and add a Main Entrance. |
-| Microphone or AI not working | Allow the microphone, use HTTPS or localhost, check the Deepgram and Groq keys. |
-| "Malawian voice is not configured" | Set both ElevenLabs variables and restart (optional feature). |
-| Black 3D scene / install fails / port 3000 busy | Enable WebGL; update Node.js to 20.9+ and reinstall; run `npx next dev -p 3001`. |
+1. **Backend**: run `npx convex deploy`. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` on production, then:
+   ```bash
+   npx convex run seed:seedAdmin --prod
+   ```
+2. **Web app**: deploy to [Vercel](https://vercel.com) (or `npm run build` then `npm run start`) with the same environment variables, using the **production** `NEXT_PUBLIC_CONVEX_URL`.
+3. **HTTPS**: always serve over HTTPS. Browsers allow microphone and camera only on HTTPS or localhost.
 
-## Security notes
+---
 
-- `NEXT_PUBLIC_` variables (including the Groq and Deepgram keys) are visible to anyone who opens the app. Use usage-limited keys and rotate them if leaked.
-- Keep `ADMIN_PASSWORD` secret. After first sign-in, create a personal admin account and optionally remove the seeded one.
-- Never commit `.env.local` to Git.
+## 🛠️ Troubleshooting
 
-## Scripts
+<details>
+<summary><b>⚠️ "NEXT_PUBLIC_CONVEX_URL is not set" or the page is stuck on Loading</b></summary>
+
+Run `npx convex dev` and keep it running, then restart `npm run dev`.
+</details>
+
+<details>
+<summary><b>🔐 <code>seedAdmin</code> fails, or I can't sign in</b></summary>
+
+Set a 16+ character `ADMIN_PASSWORD` in the **same** Convex deployment, and use the exact `ADMIN_EMAIL`. If you forgot the password, update it and run `rotateSeededAdminPassword`.
+</details>
+
+<details>
+<summary><b>🗺️ No destinations, or "No route" in the editor</b></summary>
+
+Add rooms and click **Publish**. Connect any disconnected nodes and make sure a **Main Entrance** exists (the Dashboard shows what is missing).
+</details>
+
+<details>
+<summary><b>🎙️ Microphone or AI not working</b></summary>
+
+Allow microphone access, use HTTPS or localhost, and check `NEXT_PUBLIC_DEEPGRAM_API_KEY` and `NEXT_PUBLIC_GROQ_API_KEY`. Without Groq, original direction text is used.
+</details>
+
+<details>
+<summary><b>🔈 "Malawian voice is not configured"</b></summary>
+
+Set both ElevenLabs variables and restart. This feature is optional.
+</details>
+
+<details>
+<summary><b>🧱 Black 3D scene, install fails, or port 3000 is busy</b></summary>
+
+Enable WebGL / hardware acceleration. Update Node.js to 20.9+ and reinstall. Use another port with `npx next dev -p 3001`.
+</details>
+
+---
+
+## 🔒 Security Notes
+
+> [!CAUTION]
+> Variables starting with `NEXT_PUBLIC_` (including the Groq and Deepgram keys) are visible to anyone who opens the app. Use usage-limited keys and rotate them if they leak.
+
+- 🤫 Keep `ADMIN_PASSWORD` secret. After first sign-in, create a personal admin and optionally remove the seeded one.
+- 🚫 Never commit `.env.local`.
+- 📜 Review the audit log in **Manage Settings** regularly.
+
+---
+
+## ⌨️ Scripts
 
 | Command | Purpose |
-| --- | --- |
+| :--- | :--- |
 | `npm run dev` | Start the web app |
 | `npm run dev:all` | Start Convex and the web app together |
-| `npm run build` / `npm run start` | Build and run for production |
+| `npm run build` | Build for production |
+| `npm run start` | Run the production build |
 | `npm run lint` | Lint the code |
+
+<div align="center">
+
+<br>
+
+**Made with 💙 for easier indoor wayfinding**
+
+</div>
